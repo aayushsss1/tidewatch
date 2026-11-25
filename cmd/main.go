@@ -100,6 +100,9 @@ func newProvider(name, model string) llm.Provider {
 	return nil
 }
 
+// webhookLookupTimeout bounds the startup read of the Slack webhook Secret.
+const webhookLookupTimeout = 10 * time.Second
+
 // webhookURL reads the Slack webhook once from the named Secret in the
 // operator namespace. Failure disables Slack only.
 func webhookURL(r client.Reader, secret string) string {
@@ -107,8 +110,10 @@ func webhookURL(r client.Reader, secret string) string {
 	if secret == "" || ns == "" {
 		return ""
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), webhookLookupTimeout)
+	defer cancel()
 	var sec corev1.Secret
-	if err := r.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: secret}, &sec); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: secret}, &sec); err != nil {
 		setupLog.Error(err, "Reading Slack webhook secret; Slack disabled", "secret", secret)
 		return ""
 	}

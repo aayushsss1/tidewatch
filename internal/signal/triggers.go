@@ -172,12 +172,16 @@ func Detect(in Input, uid types.UID, wl types.NamespacedName, pol v1.PolicyRef, 
 	return out
 }
 
-// anomalyShortfall is |actual − forecast| / forecast, or 0 without a positive forecast.
+// maxAnomalyShortfall bounds the shortfall so a near-zero forecast cannot yield a huge ratio.
+const maxAnomalyShortfall = 10
+
+// anomalyShortfall is |actual − forecast| / forecast, capped at maxAnomalyShortfall,
+// or 0 without a positive forecast.
 func anomalyShortfall(in Input) float64 {
 	if in.AnomalyForecast <= 0 || math.IsNaN(in.Actual) || math.IsInf(in.Actual, 0) {
 		return 0
 	}
-	return math.Abs(in.Actual-in.AnomalyForecast) / in.AnomalyForecast
+	return min(math.Abs(in.Actual-in.AnomalyForecast)/in.AnomalyForecast, maxAnomalyShortfall)
 }
 
 func forecastBreach(in Input) (ttb time.Duration, shortfall float64, ok bool) {

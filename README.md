@@ -81,7 +81,7 @@ kubectl tidewatch reject  <incident-id> -n shop
 - **Overrides only lift.** An override can raise the replica floor. It can never lower the baseline's number or scale a workload down.
 - **The baseline is never blocked.** If the agent is disabled, slow, wrong, out of budget, or the provider is down, the baseline keeps scaling exactly as it would without the agent.
 - **Guardrails still apply.** Overrides pass through the same `maxReplicas`, `maxStep`, cooldown and total-replica limits as baseline decisions.
-- **Budget.** The agent spends at most `--agent-token-budget-per-hour` LLM tokens per hour (default 200000), plus per-investigation limits (`maxToolCalls`, `investigationTimeout`).
+- **Budget.** The agent spends at most `--agent-token-budget-per-hour` LLM tokens per hour (default 200000), plus per-investigation limits (`maxToolCalls`, `investigationTimeout`). The token budget is a soft limit: an investigation that is projected to run over its token cap is moved to its final turn instead of being cut off, and a single investigation can overshoot the hourly budget slightly.
 - **Circuit breaker.** Repeated provider failures open a breaker and the agent stops calling the provider until it recovers.
 - **Storm mode.** A burst of triggers is collapsed into a single investigation, so a cluster-wide event cannot fan out into many LLM calls.
 
@@ -94,7 +94,7 @@ Only what the tools return, and only when an investigation runs:
 - event messages, truncated; set `spec.agent.redactEventMessages: true` to redact them;
 - the text of your ops notes and any episode notes.
 
-Secrets and pod specs are never sent.
+Secrets and full pod specs are never sent; resource requests/limits and image tags are.
 
 ### Running Act 2
 
@@ -102,7 +102,7 @@ Act 2 of the demo is a flash sale. The ops note announces it, the traffic genera
 
 ```sh
 export ANTHROPIC_API_KEY=...          # this makes paid LLM calls
-make demo-down demo-e2e-act2          # about 30 minutes; asserts the agent's override, an episode and the ghost metric
+make demo-down demo-e2e-act2          # about 30 minutes; asserts the agent's override and the ghost metric
 ```
 
 or `ANTHROPIC_API_KEY=... make demo` to run it without the assertions. `make demo` creates Secret `tidewatch-llm`, deploys with `--llm-provider=anthropic`, sets `agent.enabled: true` with `approval: Auto`, adds the ops note and seeds one hand-written `TideEpisode`. Without the key it prints `Act 2 skipped: set ANTHROPIC_API_KEY to run the agent` and Act 1 runs unchanged, with the same traffic shape. `make demo-e2e` runs Act 1 only: it strips `ANTHROPIC_API_KEY` from the environment, so an exported key never causes paid calls (CI uses it).

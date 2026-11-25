@@ -329,3 +329,12 @@ func TestDetect_NilDebouncer(t *testing.T) {
 		t.Fatal("nil debouncer must not suppress")
 	}
 }
+
+func TestDetect_AnomalyShortfallCappedAtTen(t *testing.T) {
+	in := base()
+	in.OutsideSteps = 3
+	in.Actual, in.AnomalyForecast = 5000, 100 // ratio 49
+	if tr := has(detect(in), Anomaly); tr == nil || tr.Shortfall != 10 {
+		t.Fatalf("shortfall = %+v, want capped at 10", tr)
+	}
+}

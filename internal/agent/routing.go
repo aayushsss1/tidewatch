@@ -17,7 +17,6 @@ import (
 
 const (
 	defaultApprovalTimeout = 10 * time.Minute
-	approvalStartGrace     = 2 * time.Minute
 	approvalAuto           = "Auto"
 )
 
@@ -105,7 +104,7 @@ func (iv *Investigator) route(
 		pa := v1.PendingApproval{
 			IncidentID: inc.ID, Override: o, Confidence: strconv.FormatFloat(p.Confidence, 'f', 2, 64),
 			Reason: p.Reason, Trace: trace,
-			Expires: metav1.NewTime(minTime(now.Add(timeout), o.Start.Add(approvalStartGrace))),
+			Expires: metav1.NewTime(minTime(now.Add(timeout), o.End.Time)),
 		}
 		superseded, err := iv.Store.AddPending(uid, pa)
 		if err != nil {

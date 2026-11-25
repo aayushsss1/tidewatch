@@ -335,8 +335,8 @@ func TestInvestigator_ManualModeBecomesPendingAndNotifies(t *testing.T) {
 	if len(ovs) != 0 || len(pend) != 1 {
 		t.Fatalf("overrides=%d pending=%d, want 0 and 1", len(ovs), len(pend))
 	}
-	// start defaults to now, so the approval window is start+2m, shorter than the 10m timeout.
-	if want := f.clk.Now().Add(2 * time.Minute); !pend[0].Expires.Time.Equal(want) {
+	// The window (30m) outlasts the 10m approval timeout, which is therefore the bound.
+	if want := f.clk.Now().Add(10 * time.Minute); !pend[0].Expires.Time.Equal(want) {
 		t.Errorf("expires = %v, want %v", pend[0].Expires, want)
 	}
 	if pend[0].Override.MinReplicas != 9 || pend[0].Confidence != "0.80" || pend[0].Reason != "payday surge" {
@@ -365,6 +365,22 @@ func TestInvestigator_ManualExpiryCappedByTimeout(t *testing.T) {
 	_, pend, _ := f.store.Snapshot(f.uids["frontend-late-start"])
 	if len(pend) != 1 || !pend[0].Expires.Time.Equal(f.clk.Now().Add(10*time.Minute)) {
 		t.Fatalf("pending = %+v", pend)
+	}
+}
+
+func TestInvestigator_ManualExpiryCappedByWindowEnd(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Manual", "frontend-short")
+	end := f.clk.Now().Add(5 * time.Minute) // closes before the 10m approval timeout
+	f.script("propose_scaling", map[string]any{
+		kReason: "r", kConf: 0.9,
+		"overrides": []map[string]any{{
+			"workload": "frontend-short", "minReplicas": 5, "end": end.Format(time.RFC3339),
+		}},
+	}, 100)
+	f.iv.Investigate(f.ctx, f.incident("frontend-short"), f.deadline())
+	_, pend, _ := f.store.Snapshot(f.uids["frontend-short"])
+	if len(pend) != 1 || !pend[0].Expires.Time.Equal(end) {
+		t.Fatalf("pending = %+v, want expiry at the window end %v", pend, end)
 	}
 }
 
