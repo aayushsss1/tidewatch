@@ -14,6 +14,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -77,8 +78,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var ns, user string
 	var all bool
-	fs.StringVar(&ns, "namespace", "default", "namespace to search")
-	fs.StringVar(&ns, "n", "default", "namespace to search (shorthand)")
+	defNS := currentNamespace()
+	fs.StringVar(&ns, "namespace", defNS, "namespace to search (default: current context)")
+	fs.StringVar(&ns, "n", defNS, "namespace to search (shorthand)")
 	fs.BoolVar(&all, "A", false, "search all namespaces")
 	fs.BoolVar(&all, "all-namespaces", false, "search all namespaces")
 	fs.StringVar(&user, "as-user", defaultUser(), "user recorded in the annotation")
@@ -128,6 +130,16 @@ func utilMust(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+// currentNamespace returns the namespace of the current kubeconfig context.
+func currentNamespace() string {
+	ns, _, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).Namespace()
+	if err != nil || ns == "" {
+		return "default"
+	}
+	return ns
 }
 
 func defaultUser() string {
@@ -185,7 +197,7 @@ func annotate(
 		n++
 	}
 	if n == 0 {
-		return &exitError{code: 1, err: fmt.Errorf("%w: %q", errNoMatch, id)}
+		return &exitError{code: 1, err: fmt.Errorf("%w: %q (try -A to search all namespaces)", errNoMatch, id)}
 	}
 	return nil
 }

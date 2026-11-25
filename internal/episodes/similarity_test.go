@@ -2,6 +2,7 @@ package episodes
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,5 +130,32 @@ func TestSummary_Format(t *testing.T) {
 	}
 	if n := len([]rune(Summary("ep1", 0.5, ep))); n > 400 {
 		t.Fatalf("len=%d", n)
+	}
+}
+
+func TestEpisodeName_EmptyAndTrailingLead(t *testing.T) {
+	r := &Recorder{}
+	ep := r.Build(&IncidentView{ID: "x", Lead: "___", Policy: v1.PolicyRef{Namespace: "n", Name: "p"}, Start: t0})
+	if !strings.HasPrefix(ep.Name, "episode-") {
+		t.Fatal(ep.Name)
+	}
+	if got := ep.Labels[LabelLead]; got != "" {
+		t.Fatalf("label %q", got)
+	}
+	if got := leadLabel("web-front_"); got != "web-front" {
+		t.Fatal(got)
+	}
+}
+
+func TestShape_NegativeValuesRoundTrip(t *testing.T) {
+	in := make([]float64, 32)
+	for i := range in {
+		in[i] = float64(i-16) / 4
+	}
+	got := decodeShape(EncodeShape(in))
+	for i := range in {
+		if math.Abs(got[i]-in[i]) > 1e-4 {
+			t.Fatalf("%d: %v vs %v", i, got[i], in[i])
+		}
 	}
 }

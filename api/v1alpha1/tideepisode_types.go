@@ -66,8 +66,8 @@ type TideEpisodeSpec struct {
 	PeakAt metav1.Time `json:"peakAt"`
 	// +required
 	End metav1.Time `json:"end"`
-	// Shape is the normalized load curve: 0 or 32 decimal points.
-	// +kubebuilder:validation:items:Pattern=`^[0-9]+(\.[0-9]+)?$`
+	// Shape holds 32 z-normalized points of the lead workload's load (may be negative).
+	// +kubebuilder:validation:items:Pattern=`^-?[0-9]+(\.[0-9]+)?$`
 	// +optional
 	Shape []string `json:"shape,omitempty"`
 	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`

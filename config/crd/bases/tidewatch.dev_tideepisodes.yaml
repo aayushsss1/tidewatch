@@ -146,10 +146,10 @@ spec:
                 - namespace
                 type: object
               shape:
-                description: 'Shape is the normalized load curve: 0 or 32 decimal
-                  points.'
+                description: Shape holds 32 z-normalized points of the lead workload's
+                  load (may be negative).
                 items:
-                  pattern: ^[0-9]+(\.[0-9]+)?$
+                  pattern: ^-?[0-9]+(\.[0-9]+)?$
                   type: string
                 type: array
               source:

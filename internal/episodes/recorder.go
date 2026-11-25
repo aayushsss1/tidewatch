@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -89,7 +90,7 @@ func (r *Recorder) Build(inc *IncidentView) *v1.TideEpisode {
 			Namespace: inc.Policy.Namespace,
 			Labels: map[string]string{
 				v1.LabelPolicy: inc.Policy.Namespace + "." + inc.Policy.Name,
-				LabelLead:      truncate(inc.Lead, 63),
+				LabelLead:      leadLabel(inc.Lead),
 			},
 		},
 		Spec: v1.TideEpisodeSpec{
@@ -117,8 +118,18 @@ func episodeName(inc *IncidentView) string {
 	suffix := hex.EncodeToString(sum[:])[:6]
 	stamp := inc.Start.UTC().Format("200601021504")
 	lead := sanitize(inc.Lead)
+	if lead == "" {
+		lead = "episode"
+	}
 	tail := "-" + stamp + "-" + suffix
 	return strings.TrimRight(truncate(lead, 63-len(tail)), "-.") + tail
+}
+
+// leadLabel makes a workload name a valid label value: at most 63 characters,
+// starting and ending alphanumeric.
+func leadLabel(s string) string {
+	isAlnum := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	return strings.TrimFunc(truncate(s, 63), func(r rune) bool { return !isAlnum(r) })
 }
 
 func sanitize(s string) string {

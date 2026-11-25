@@ -21,10 +21,6 @@ const (
 
 	wShape, wCalendar, wContext = 0.6, 0.25, 0.15
 
-	// ShapeOffset is added to every z-normalized value when a shape is stored,
-	// because the CRD only allows non-negative decimals. |z| <= sqrt(31) < 6.
-	ShapeOffset = 6.0
-
 	maxSummary = 400
 	utc        = "UTC"
 )
@@ -90,14 +86,14 @@ func Shape(s forecast.Series, from, to time.Time) []float64 {
 	return out
 }
 
-// EncodeShape renders a z-normalized shape as CRD decimals (offset by ShapeOffset).
+// EncodeShape renders a z-normalized shape as CRD decimals (values may be negative).
 func EncodeShape(sh []float64) []string {
 	if len(sh) == 0 {
 		return nil
 	}
 	out := make([]string, len(sh))
 	for i, v := range sh {
-		out[i] = strconv.FormatFloat(math.Max(0, v+ShapeOffset), 'f', 4, 64)
+		out[i] = strconv.FormatFloat(v, 'f', 4, 64)
 	}
 	return out
 }
@@ -112,7 +108,7 @@ func decodeShape(in []string) []float64 {
 		if err != nil {
 			return nil
 		}
-		out[i] = v - ShapeOffset
+		out[i] = v
 	}
 	return out
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -157,6 +158,13 @@ var _ = Describe("CRD validation", func() {
 		err := k8sClient.Create(ctx, e)
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
 		Expect(err.Error()).To(ContainSubstring("shape"))
+	})
+	It("accepts a TideEpisode with negative z-normalized shape values", func() {
+		e := minimalEpisode("neg-shape")
+		for i := range 32 {
+			e.Spec.Shape = append(e.Spec.Shape, fmt.Sprintf("%.2f", float64(i-16)/8))
+		}
+		Expect(k8sClient.Create(ctx, e)).To(Succeed())
 	})
 	It("accepts a manual TideEpisode without shape", func() {
 		e := minimalEpisode("no-shape")
