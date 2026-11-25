@@ -157,3 +157,37 @@ func TestCollector_Forget(t *testing.T) {
 		t.Fatalf("calls = %+v", q.calls)
 	}
 }
+
+func TestCollector_NewWorkloadWithShortHistoryIsHealthy(t *testing.T) {
+	// 2 "seasons" (20 min) of data inside a 70 min history window: the leading NaNs
+	// predate the series and are not gaps.
+	q := &fakeQuerier{nan: func(ts time.Time) bool { return ts.Before(t0.Add(-20 * step)) }}
+	c := NewCollector(q)
+	_, g, err := c.Update(context.Background(), "k", "q", 70*step, step, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.Healthy() {
+		t.Fatalf("gaps = %+v, want healthy", g)
+	}
+}
+
+func TestCollector_InteriorGapsAfterFirstSampleStillCount(t *testing.T) {
+	q := &fakeQuerier{nan: func(ts time.Time) bool {
+		return ts.Before(t0.Add(-40*step)) || (ts.After(t0.Add(-30*step)) && ts.Before(t0.Add(-20*step)))
+	}}
+	c := NewCollector(q)
+	_, g, _ := c.Update(context.Background(), "k", "q", 70*step, step, t0)
+	if g.Healthy() {
+		t.Fatalf("gaps = %+v, want unhealthy", g)
+	}
+}
+
+func TestCollector_NoValidSamplesIsUnhealthy(t *testing.T) {
+	q := &fakeQuerier{nan: func(time.Time) bool { return true }}
+	c := NewCollector(q)
+	_, g, _ := c.Update(context.Background(), "k", "q", history, step, t0)
+	if g.Healthy() {
+		t.Fatalf("gaps = %+v, want unhealthy", g)
+	}
+}

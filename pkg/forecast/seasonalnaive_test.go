@@ -109,3 +109,27 @@ func TestRegistry_UnknownModel(t *testing.T) {
 		t.Fatalf("err = %v, want mention of nope", err)
 	}
 }
+
+func TestSeasonalNaive_NaNAtSeasonAgoUsesEarlierSeason(t *testing.T) {
+	nan := math.NaN()
+	s := mkSeries(1, 2, 3, 4, 5, 2, 3, 4, nan, 2, 3, 4)
+	f, err := NewSeasonalNaive().Forecast(context.Background(), s, 4*time.Minute, 4*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Points[0].Point; got != 5 {
+		t.Errorf("point 0 = %v, want 5 (one season earlier)", got)
+	}
+}
+
+func TestSeasonalNaive_NoValidSeasonUsesLastValid(t *testing.T) {
+	nan := math.NaN()
+	s := mkSeries(nan, 2, 3, 4, nan, 2, 3, 4, nan, 2, 3, 4)
+	f, err := NewSeasonalNaive().Forecast(context.Background(), s, 4*time.Minute, 4*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Points[0].Point; got != 4 {
+		t.Errorf("point 0 = %v, want last valid 4", got)
+	}
+}

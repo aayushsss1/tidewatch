@@ -61,8 +61,13 @@ func (hw *holtWinters) Forecast(ctx context.Context, s Series, horizon, season t
 	for i, p := range s.Points {
 		y[i] = p.V
 	}
-	if !finite(y...) {
-		return Forecast{}, fmt.Errorf("%w: non-finite input", ErrModelFailed)
+	for _, v := range y {
+		if math.IsInf(v, 0) {
+			return Forecast{}, fmt.Errorf("%w: non-finite input", ErrModelFailed)
+		}
+	}
+	if _, _, ok := hwInit(y, m); !ok {
+		return Forecast{}, fmt.Errorf("%w: an initial season has no valid samples", ErrInsufficientHistory)
 	}
 
 	hw.mu.Lock()
@@ -118,21 +123,22 @@ type hwState struct {
 // runHW initializes from the first two seasons and runs the additive recursion
 // over all of y, collecting one-step errors for t >= m.
 func runHW(y []float64, m int, p hwParams) hwState {
-	var m1, m2 float64
-	for i := range m {
-		m1 += y[i]
-		m2 += y[m+i]
-	}
-	m1 /= float64(m)
-	m2 /= float64(m)
+	m1, m2, _ := hwInit(y, m)
 	st := hwState{level: m1, trend: (m2 - m1) / float64(m), seasonal: make([]float64, m), errs: make([]float64, 0, len(y))}
 	for i := range m {
-		st.seasonal[i] = y[i] - m1
+		switch {
+		case !math.IsNaN(y[i]):
+			st.seasonal[i] = y[i] - m1
+		case !math.IsNaN(y[m+i]):
+			st.seasonal[i] = y[m+i] - m2
+		}
 	}
 	for t, v := range y {
 		si := t % m
 		pred := st.level + st.trend + st.seasonal[si]
-		if t >= m { // the first season seeds the seasonal terms, so its errors are artifacts
+		if math.IsNaN(v) {
+			v = pred // a missing observation: assume the one-step prediction, no error term
+		} else if t >= m { // the first season seeds the seasonal terms, so its errors are artifacts
 			e := v - pred
 			st.errs = append(st.errs, e)
 			st.sse += e * e
@@ -143,6 +149,28 @@ func runHW(y []float64, m int, p hwParams) hwState {
 		st.seasonal[si] = p.gamma*(v-st.level) + (1-p.gamma)*st.seasonal[si]
 	}
 	return st
+}
+
+// hwInit returns the NaN-aware means of the first two seasons; ok is false when
+// either season has no valid sample.
+func hwInit(y []float64, m int) (m1, m2 float64, ok bool) {
+	mean := func(xs []float64) (float64, bool) {
+		var sum float64
+		n := 0
+		for _, x := range xs {
+			if !math.IsNaN(x) {
+				sum += x
+				n++
+			}
+		}
+		if n == 0 {
+			return 0, false
+		}
+		return sum / float64(n), true
+	}
+	m1, ok1 := mean(y[:m])
+	m2, ok2 := mean(y[m : 2*m])
+	return m1, m2, ok1 && ok2
 }
 
 // fitHW grid-searches (alpha, beta, gamma) minimizing in-sample one-step SSE.

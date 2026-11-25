@@ -170,3 +170,38 @@ func TestHoltWinters_HalfWidthReflectsNoiseWithMinimalHistory(t *testing.T) {
 		t.Errorf("h=1 half-width = %.3f (%.2fx of 1.645*sigma_true), want within [1.0, 1.6]x", half, ratio)
 	}
 }
+
+func TestHoltWinters_ToleratesNaNGap(t *testing.T) {
+	nan := math.NaN()
+	s := hwSeries(96, func(i int) float64 {
+		if i >= 60 && i < 65 {
+			return nan
+		}
+		return sineAt(i)
+	})
+	f, err := NewHoltWinters(HoltWintersOptions{}).Forecast(context.Background(), s, hwSeason, hwSeason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ape float64
+	for h, p := range f.Points {
+		truth := sineAt(96 + h)
+		ape += math.Abs(p.Point-truth) / truth
+	}
+	if mape := ape / 24; mape >= 0.10 {
+		t.Errorf("MAPE = %.4f, want < 0.10", mape)
+	}
+}
+
+func TestHoltWinters_AllNaNInitialSeasonIsInsufficientHistory(t *testing.T) {
+	s := hwSeries(96, func(i int) float64 {
+		if i < 24 {
+			return math.NaN()
+		}
+		return sineAt(i)
+	})
+	_, err := NewHoltWinters(HoltWintersOptions{}).Forecast(context.Background(), s, hwSeason, hwSeason)
+	if !errors.Is(err, ErrInsufficientHistory) {
+		t.Fatalf("err = %v, want ErrInsufficientHistory", err)
+	}
+}

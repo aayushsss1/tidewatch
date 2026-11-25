@@ -29,13 +29,23 @@ func (seasonalNaive) Forecast(_ context.Context, s Series, horizon, season time.
 	for i, p := range s.Points {
 		y[i] = p.V
 	}
+	lastValid := math.NaN()
+	for i := n - 1; i >= 0; i-- {
+		if !math.IsNaN(y[i]) {
+			lastValid = y[i]
+			break
+		}
+	}
+	if math.IsNaN(lastValid) {
+		return Forecast{}, fmt.Errorf("%w: no valid samples", ErrInsufficientHistory)
+	}
 	sigma := seasonalDiffStdDev(y, m)
 	last := s.Points[n-1].T
 	steps := int(horizon / s.Step)
 	f := Forecast{Model: "seasonal-naive", Points: make([]ForecastPoint, 0, steps)}
 	for h := 1; h <= steps; h++ {
 		k := (h + m - 1) / m
-		v := y[n-1+h-m*k]
+		v := seasonAgo(y, n-1+h, m, k, lastValid)
 		half := z90 * sigma * math.Sqrt(float64(k))
 		fp := ForecastPoint{
 			T:     last.Add(time.Duration(h) * s.Step),
@@ -49,6 +59,17 @@ func (seasonalNaive) Forecast(_ context.Context, s Series, horizon, season time.
 		f.Points = append(f.Points, fp)
 	}
 	return f, nil
+}
+
+// seasonAgo returns y at index idx-m*k, trying older seasons (k+1, ...) while the
+// value is missing and still within history, then falling back to lastValid.
+func seasonAgo(y []float64, idx, m, k int, lastValid float64) float64 {
+	for ; idx-m*k >= 0; k++ {
+		if v := y[idx-m*k]; !math.IsNaN(v) {
+			return v
+		}
+	}
+	return lastValid
 }
 
 // seasonalDiffStdDev is the sample standard deviation of y[t]-y[t-m], skipping

@@ -4,6 +4,7 @@ package engine
 import (
 	"context"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -94,10 +95,14 @@ func (c *Collector) snapshot(b *buffer, capacity int) (forecast.Series, GapStats
 }
 
 func gapStats(pts []forecast.Point) GapStats {
-	var g GapStats
-	if len(pts) == 0 {
-		return g
+	// Leading NaNs predate the series and are not gaps: count from the first
+	// valid sample. Models signal too-short history via ErrInsufficientHistory.
+	first := slices.IndexFunc(pts, func(p forecast.Point) bool { return !math.IsNaN(p.V) })
+	if first < 0 { // no valid samples at all: unhealthy
+		return GapStats{RecentMissing: len(pts), SeasonMissingFrac: 1}
 	}
+	pts = pts[first:]
+	var g GapStats
 	missing := 0
 	for _, p := range pts {
 		if math.IsNaN(p.V) {
