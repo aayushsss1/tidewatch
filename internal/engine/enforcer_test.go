@@ -153,3 +153,57 @@ func TestEnforce_ExternalChangeThenScalesAfterCooldown(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+func TestEnforce_ExternalChangeNoDesiredChangeHeld(t *testing.T) {
+	in := enfIn(2, 2)
+	in.State.LastApplied = new(int32(5))
+	r := Enforce(in)
+	if !r.ExternalChange || r.Final != 2 || r.Decision.Verdict != v1.VerdictHeld || r.Apply {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestEnforce_ExternalScaleDownThenUpHeldByUpCooldown(t *testing.T) {
+	in := enfIn(2, 8)
+	in.Now = t0.Add(30 * time.Second)
+	in.State.LastScaleDown = t0 // set by engine at observation; both cooldowns restarted
+	in.State.LastScaleUp = t0
+	in.State.LastApplied = new(int32(5))
+	r := Enforce(in)
+	if r.Final != 2 || r.Decision.Verdict != v1.VerdictHeld || !hasReason(r, "cooldown") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestEnforce_CurrentAboveMaxIgnoresDownCooldown(t *testing.T) {
+	in := enfIn(12, 4)
+	in.Config.MaxReplicas = 10
+	in.State.LastScaleDown = t0.Add(-10 * time.Second)
+	in.Rails.ScaleDown.StabilizationWindow = metav1.Duration{Duration: time.Hour}
+	in.State.Recommendations = []TimedReplicas{{T: t0.Add(-time.Minute), Replicas: 12}}
+	r := Enforce(in)
+	if r.Final != 7 || !r.Apply || !hasReason(r, "bounds") || hasReason(r, "cooldown") {
+		t.Fatalf("%+v", r)
+	}
+	in.Rails.ScaleDown.MaxStep = 0
+	if r := Enforce(in); r.Final != 4 {
+		// desired 4 is within bounds, so it is honored once maxStep is lifted
+		t.Fatalf("%+v", r)
+	}
+	in = enfIn(12, 10)
+	in.Config.MaxReplicas = 10
+	in.State.LastScaleDown = t0.Add(-10 * time.Second)
+	if r := Enforce(in); r.Final != 10 || !r.Apply || !hasReason(r, "bounds") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestEnforce_CurrentBelowMinIgnoresUpCooldown(t *testing.T) {
+	in := enfIn(0, 0)
+	in.Config.MinReplicas = 2
+	in.State.LastScaleUp = t0.Add(-10 * time.Second)
+	r := Enforce(in)
+	if r.Final != 2 || !r.Apply || !hasReason(r, "bounds") || hasReason(r, "cooldown") {
+		t.Fatalf("%+v", r)
+	}
+}

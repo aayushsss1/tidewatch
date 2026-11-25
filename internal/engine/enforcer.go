@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,11 +87,7 @@ func Enforce(in EnforceInput) EnforceResult {
 	if st.LastApplied != nil && *st.LastApplied != st.Current {
 		res.ExternalChange = true
 		reasons = append(reasons, reasonExternalChange)
-		if in.Desired > st.Current {
-			lastUp = in.Now
-		} else {
-			lastDown = in.Now
-		}
+		lastUp, lastDown = in.Now, in.Now // a human just acted: don't flap in either direction
 	}
 
 	final := min(max(in.Desired, in.Config.MinReplicas), in.Config.MaxReplicas)
@@ -107,19 +104,14 @@ func Enforce(in EnforceInput) EnforceResult {
 		reasons = append(reasons, reasonMaxStep)
 	}
 
-	switch {
-	case final > st.Current && in.Now.Sub(lastUp) < up.Cooldown.Duration && !lastUp.IsZero():
-		final = st.Current
-		reasons = append(reasons, reasonCooldown)
-	case final < st.Current && in.Now.Sub(lastDown) < down.Cooldown.Duration && !lastDown.IsZero():
-		final = st.Current
-		reasons = append(reasons, reasonCooldown)
-	case final < st.Current:
-		if stab := stabilized(final, st, in.Now, down.StabilizationWindow.Duration); stab != final {
-			final = stab
-			reasons = append(reasons, reasonStabilization)
-		}
+	// Bounds are a hard rail: moving Current toward an out-of-range bound skips cooldown and stabilization.
+	towardBound := (st.Current > in.Config.MaxReplicas && final < st.Current) ||
+		(st.Current < in.Config.MinReplicas && final > st.Current)
+	if towardBound && !slices.Contains(reasons, reasonBounds) {
+		reasons = append(reasons, reasonBounds)
 	}
+
+	final, reasons = applyCooldowns(final, reasons, in, lastUp, lastDown, towardBound)
 
 	if budget := in.Rails.MaxTotalReplicas; budget != nil && final > st.Current && st.OthersTotal+final > *budget {
 		final = max(st.Current, *budget-st.OthersTotal)
@@ -157,4 +149,26 @@ func stabilized(final int32, st EnforceState, now time.Time, window time.Duratio
 		}
 	}
 	return min(final, st.Current)
+}
+
+// applyCooldowns holds or softens a move per cooldown and stabilization; towardBound exempts it.
+func applyCooldowns(
+	final int32, reasons []string, in EnforceInput, lastUp, lastDown time.Time, towardBound bool,
+) (int32, []string) {
+	st, up, down := in.State, in.Rails.ScaleUp, in.Rails.ScaleDown
+	switch {
+	case towardBound:
+	case final > st.Current && !lastUp.IsZero() && in.Now.Sub(lastUp) < up.Cooldown.Duration:
+		final = st.Current
+		reasons = append(reasons, reasonCooldown)
+	case final < st.Current && !lastDown.IsZero() && in.Now.Sub(lastDown) < down.Cooldown.Duration:
+		final = st.Current
+		reasons = append(reasons, reasonCooldown)
+	case final < st.Current:
+		if stab := stabilized(final, st, in.Now, down.StabilizationWindow.Duration); stab != final {
+			final = stab
+			reasons = append(reasons, reasonStabilization)
+		}
+	}
+	return final, reasons
 }
