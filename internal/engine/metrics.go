@@ -30,6 +30,14 @@ var (
 		Name: "tidewatch_decisions_total",
 		Help: "Scaling decisions by source and verdict.",
 	}, append([]string{"source", "verdict"}, wlLabels...))
+	baselineOnlyGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "tidewatch_baseline_only_replicas",
+		Help: "Replicas the baseline wanted before any agent override, the ghost series to plot against desired.",
+	}, wlLabels)
+	outcomeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "tidewatch_decision_outcome_total",
+		Help: "Scored agent overrides by outcome (timely|late|unneeded).",
+	}, []string{"outcome"})
 	stepDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "tidewatch_step_duration_seconds",
 		Help:    "Time spent evaluating one workload in a tick.",
@@ -43,7 +51,7 @@ func registerMetrics() {
 	registerOnce.Do(func() {
 		ctrlmetrics.Registry.MustRegister(
 			forecastGauge, forecastErrorGauge, capacityRatioGauge,
-			desiredReplicasGauge, decisionsTotal, stepDuration,
+			desiredReplicasGauge, decisionsTotal, stepDuration, baselineOnlyGauge, outcomeTotal,
 		)
 	})
 }
@@ -57,4 +65,5 @@ func forgetMetrics(namespace, workload string) {
 	desiredReplicasGauge.DeletePartialMatch(m)
 	decisionsTotal.DeletePartialMatch(m)
 	stepDuration.DeletePartialMatch(m)
+	baselineOnlyGauge.DeletePartialMatch(m)
 }

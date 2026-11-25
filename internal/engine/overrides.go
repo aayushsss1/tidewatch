@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"slices"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
+	"github.com/aayushsss1/tidewatch/internal/overrides"
 )
 
 const defaultApprover = "kubectl"
@@ -125,4 +127,76 @@ func (e *Engine) applyOverride(it *item) {
 
 func slicesContainsUID(uids []types.UID, tw *v1.TideWorkload) bool {
 	return slices.Contains(uids, tw.UID)
+}
+
+// track accumulates the samples of one override until it can be scored.
+type track struct {
+	ov      v1.Override
+	samples []overrides.Sample
+}
+
+func overrideKey(o v1.Override) string { return o.ID + "/" + o.IncidentID }
+
+// sampleOverrides records one sample per override active at it.now and scores
+// the overrides whose window plus forecast horizon has passed. Samples are
+// kept in memory only: an override in flight across a failover is not scored.
+func (e *Engine) sampleOverrides(it *item) {
+	if e.ov == nil {
+		return
+	}
+	st, uid := it.st, it.tw.UID
+	baselineOnlyGauge.WithLabelValues(it.tw.Namespace, it.tw.Name).Set(float64(it.baselineReplicas))
+
+	ovs, _, _ := e.ov.Snapshot(uid)
+	var active []*track
+	for _, o := range ovs {
+		if o.Start.After(it.now) || !o.End.After(it.now) {
+			continue
+		}
+		if st.tracks == nil {
+			st.tracks = map[string]*track{}
+		}
+		k := overrideKey(o)
+		if st.tracks[k] == nil {
+			st.tracks[k] = &track{ov: o}
+		}
+		active = append(active, st.tracks[k])
+	}
+	unit := it.cfg.TargetPerReplica * it.cfg.Headroom
+	if unit > 0 && !math.IsNaN(it.actual) {
+		s := overrides.Sample{
+			T: it.now, Load: it.actual,
+			CapacityReady:    float64(it.scale.Ready) * unit,
+			BaselineCapacity: float64(it.baselineReplicas) * unit,
+			Replicas:         it.scale.Replicas,
+			NeededReplicas:   int32(math.Ceil(it.actual / unit)), //nolint:gosec // bounded by load/target
+		}
+		for _, t := range active {
+			t.samples = append(t.samples, s)
+		}
+	}
+
+	for k, t := range st.tracks {
+		if it.now.Before(t.ov.End.Add(it.horizon)) {
+			continue
+		}
+		out := overrides.Score(t.samples, t.ov, it.step)
+		out.ScoredAt = metav1.NewTime(it.now)
+		e.ov.AddOutcome(uid, v1.RecentOutcome{
+			IncidentID: t.ov.IncidentID, Time: metav1.NewTime(it.now), Verdict: v1.VerdictApplied,
+			MinReplicas: t.ov.MinReplicas, Outcome: &out,
+		})
+		outcomeTotal.WithLabelValues(outcomeLabel(out)).Inc()
+		delete(st.tracks, k)
+	}
+}
+
+func outcomeLabel(o v1.Outcome) string {
+	switch {
+	case o.Timely == nil:
+		return "unneeded"
+	case *o.Timely:
+		return "timely"
+	}
+	return "late"
 }

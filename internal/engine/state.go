@@ -43,7 +43,8 @@ type wlState struct {
 	lastAligned time.Time // step-aligned time of the last Record/Observe
 	replicas    int32     // last known replica count, for policy budgets
 
-	events []v1.Decision // approval, rejection and expiry decisions awaiting a status write
+	tracks map[string]*track // overrides being sampled for outcome scoring, by override key
+	events []v1.Decision     // approval, rejection and expiry decisions awaiting a status write
 
 	statusWritten bool
 	lastStatus    time.Time

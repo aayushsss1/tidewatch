@@ -67,6 +67,44 @@ func cosine(t time.Time) float64 {
 	return 50 + 40*math.Sin(2*math.Pi*float64(t.Unix())/season.Seconds())
 }
 
+// outcomeCount reads tidewatch_decision_outcome_total for one outcome label.
+func outcomeCount(outcome string) float64 {
+	mfs, err := ctrlmetrics.Registry.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	for _, mf := range mfs {
+		if mf.GetName() != "tidewatch_decision_outcome_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "outcome" && l.GetValue() == outcome {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// gaugeFor reads a per-workload gauge, or -1 when the series is absent.
+func gaugeFor(name, wl string) float64 {
+	mfs, err := ctrlmetrics.Registry.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "workload" && l.GetValue() == wl {
+					return m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return -1
+}
+
 var _ = Describe("Engine", func() {
 	var (
 		ctx   context.Context
@@ -518,6 +556,36 @@ var _ = Describe("Engine", func() {
 			Expect(st.Overrides).To(HaveLen(1))
 			Expect(st.PendingApprovals).To(HaveLen(1))
 			Expect(st.PendingApprovals[0].IncidentID).To(Equal("inc-2"))
+		})
+
+		It("records a RecentOutcome after the override window plus horizon", func() {
+			newPolicy(v1.ModeActive, nil) // horizon 30m
+			newWorkload("scored", 2)
+			o := override("inc-1", 12)
+			o.Start, o.End = metav1.NewTime(trough), metav1.NewTime(trough.Add(2*time.Minute))
+			Expect(store.AddOverride(uidOf("scored"), o)).To(Succeed())
+			before := outcomeCount("unneeded")
+
+			eng.Step(ctx) // samples inside the window
+			Expect(statusOf("scored").RecentOutcomes).To(BeEmpty())
+			clk.Step(3 * time.Minute)
+			eng.Step(ctx) // window over, horizon not yet
+			Expect(statusOf("scored").Overrides).To(BeEmpty())
+			Expect(statusOf("scored").RecentOutcomes).To(BeEmpty())
+			clk.Step(30 * time.Minute)
+			eng.Step(ctx) // End + horizon reached
+
+			st := statusOf("scored")
+			Expect(st.RecentOutcomes).To(HaveLen(1))
+			ro := st.RecentOutcomes[0]
+			Expect(ro.IncidentID).To(Equal("inc-1"))
+			Expect(ro.MinReplicas).To(Equal(int32(12)))
+			Expect(ro.Outcome).NotTo(BeNil())
+			Expect(ro.Outcome.Timely).To(BeNil(), "constant load 10 never exceeds the baseline's capacity")
+			Expect(ro.Outcome.Needed).To(BeFalse())
+			Expect(ro.Outcome.WastedReplicaMinutes).NotTo(BeEmpty())
+			Expect(outcomeCount("unneeded")).To(Equal(before + 1))
+			Expect(gaugeFor("tidewatch_baseline_only_replicas", "scored")).To(BeNumerically(">", 0))
 		})
 
 		It("writes baselineReplicas and overrides to status", func() {

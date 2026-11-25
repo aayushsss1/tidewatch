@@ -341,6 +341,7 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		return it
 	}
 	e.applyOverride(it)
+	e.sampleOverrides(it)
 	it.enforce = true
 	e.recordPhase1Metrics(it)
 	return it
