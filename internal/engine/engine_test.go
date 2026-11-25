@@ -277,6 +277,10 @@ var _ = Describe("Engine", func() {
 			// 6 replicas: capacity 48; the ramp breaches it beyond what the baseline already covers.
 			newPolicy(v1.ModeShadow, nil)
 			newWorkload("breach", 6)
+			pl := &v1.TidePolicy{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: pol}, pl)).To(Succeed())
+			pl.Spec.Agent.Enabled = true
+			Expect(k8sClient.Update(ctx, pl)).To(Succeed())
 			s := &sink{}
 			withSink := New(k8sClient, Options{
 				Clock: clk, DefaultTimeToReady: 5 * time.Minute, Triggers: s,
@@ -302,6 +306,17 @@ var _ = Describe("Engine", func() {
 			eng.Step(ctx)
 			Expect(statusOf("breach").Decisions).NotTo(BeEmpty())
 		})
+	})
+
+	It("submits no triggers for a policy whose agent is disabled", func() {
+		newPolicy(v1.ModeShadow, nil)
+		newWorkload("quiet", 6) // would breach, as in the enabled case
+		s := &sink{}
+		New(k8sClient, Options{
+			Clock: clk, DefaultTimeToReady: 5 * time.Minute, Triggers: s,
+			PromFactory: func(string, time.Duration) (prom.Querier, error) { return q, nil },
+		}).Step(ctx)
+		Expect(s.types()).To(BeEmpty())
 	})
 
 	Context("trigger detection inputs", func() {
@@ -366,6 +381,7 @@ var _ = Describe("Engine", func() {
 
 		It("raises Anomaly after 3 consecutive steps outside the trusted interval", func() {
 			newPolicy(v1.ModeShadow, nil)
+			enableAgent(nil)
 			newWorkload("anom", 6)
 			e := trigEngine()
 			e.Step(ctx) // first tick: no previous forecast to judge
@@ -472,6 +488,7 @@ var _ = Describe("Engine", func() {
 
 		It("fires WorkloadChange on an image change but not on a replica change", func() {
 			newPolicy(v1.ModeShadow, nil)
+			enableAgent(nil)
 			newWorkload("tpl", 2)
 			e := trigEngine()
 			e.Step(ctx)

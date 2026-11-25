@@ -47,7 +47,7 @@ func (e *Engine) detectTriggers(ctx context.Context, it *item, healthy bool) {
 	}
 	st := it.st
 	outside := e.trackOutside(it, healthy)
-	if !healthy {
+	if !healthy || !it.pol.Spec.Agent.Enabled { // a disabled policy never feeds the agent
 		return
 	}
 	wall := e.clock.Now()
