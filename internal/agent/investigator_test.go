@@ -420,7 +420,7 @@ func TestInvestigator_NoActionRoutesNothing(t *testing.T) {
 	f := newFixture(t, v1.ModeActive, "Auto", "frontend-na")
 	f.script("no_action", map[string]any{kReason: "weak evidence", kConf: 0.9}, 100)
 	res := f.iv.Investigate(f.ctx, f.incident("frontend-na"), f.deadline())
-	if res.Exit != llm.ExitTerminal || res.Verdict != "" || len(res.Overrides) != 0 || res.Reasons[0] != "no_action" {
+	if res.Exit != llm.ExitTerminal || res.Verdict != "" || len(res.Overrides) != 0 || res.Reasons[0] != reasonNoAction {
 		t.Fatalf("result = %+v", res)
 	}
 	if f.iv.Breaker.Open() {

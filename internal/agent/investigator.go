@@ -168,6 +168,30 @@ func (iv *Investigator) scopeIncident(
 // Investigate runs the agent loop for inc until deadline and routes its proposal.
 // It never touches TideWorkload status: decisions reach it through the engine.
 func (iv *Investigator) Investigate(ctx context.Context, inc *Incident, deadline time.Time) Result {
+	registerAgentMetrics()
+	start := time.Now()
+	res := iv.investigate(ctx, inc, deadline)
+	investigationsTotal.WithLabelValues(triggerLabel(inc), resultLabel(res)).Inc()
+	if res.Exit != "" {
+		latencySeconds.Observe(time.Since(start).Seconds())
+	}
+	if iv.Budget != nil {
+		budgetRemaining.Set(float64(iv.Budget.Remaining()))
+	}
+	if iv.Breaker != nil && iv.Provider != nil {
+		open := 0.0
+		if iv.Breaker.Open() {
+			open = 1
+		}
+		circuitOpen.WithLabelValues(iv.Provider.Name()).Set(open)
+	}
+	if iv.Store != nil {
+		setOverridesActive(iv.Store, iv.clock().Now())
+	}
+	return res
+}
+
+func (iv *Investigator) investigate(ctx context.Context, inc *Incident, deadline time.Time) Result {
 	log := logf.FromContext(ctx).WithName("agent").WithValues("incident", inc.ID)
 	clk := iv.clock()
 	now := clk.Now()
@@ -210,6 +234,11 @@ func (iv *Investigator) Investigate(ctx context.Context, inc *Incident, deadline
 		iv.Budget.Spend(out.InputTokens + out.OutputTokens)
 	}
 	res := Result{Exit: out.Exit, Trace: toTrace(ltrace)}
+	for _, e := range ltrace {
+		toolCallsTotal.WithLabelValues(e.Tool).Inc()
+	}
+	tokensTotal.WithLabelValues(iv.Provider.Name(), "input").Add(float64(out.InputTokens))
+	tokensTotal.WithLabelValues(iv.Provider.Name(), "output").Add(float64(out.OutputTokens))
 
 	switch out.Exit {
 	case llm.ExitProviderError:
