@@ -44,6 +44,8 @@ func (e *Engine) writeStatus(ctx context.Context, it *item) {
 		if dirty {
 			e.ov.MarkDirty(it.tw.UID)
 		}
+		// Keep approve/reject/expiry decisions for the next write.
+		st.events = append(slices.Clone(it.events), st.events...)
 		return
 	}
 	st.statusWritten, st.lastStatus, st.lastVerdict, st.lastFinal = true, now, d.Verdict, d.Final

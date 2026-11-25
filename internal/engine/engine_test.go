@@ -19,6 +19,7 @@ import (
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
@@ -27,6 +28,8 @@ import (
 	"github.com/aayushsss1/tidewatch/pkg/forecast"
 	"github.com/aayushsss1/tidewatch/pkg/prom"
 )
+
+const inc1 = "inc-1"
 
 const (
 	testNS   = "default"
@@ -448,13 +451,13 @@ var _ = Describe("Engine", func() {
 		It("lifts replicas to an active override but never lowers below the baseline", func() {
 			newPolicy(v1.ModeActive, nil)
 			newWorkload("lift", 2)
-			Expect(store.AddOverride(uidOf("lift"), override("inc-1", 6))).To(Succeed())
+			Expect(store.AddOverride(uidOf("lift"), override(inc1, 6))).To(Succeed())
 			eng.Step(ctx)
 
 			Expect(replicasOf("lift")).To(Equal(int32(6)))
 			st := statusOf("lift")
 			Expect(st.Decisions[0].Source).To(Equal(v1.SourceAgent))
-			Expect(st.Decisions[0].IncidentID).To(Equal("inc-1"))
+			Expect(st.Decisions[0].IncidentID).To(Equal(inc1))
 			Expect(st.Decisions[0].Desired).To(Equal(int32(6)))
 
 			// A floor below what the baseline wants changes nothing.
@@ -470,7 +473,7 @@ var _ = Describe("Engine", func() {
 		It("still runs the enforcer on an override (maxReplicas clamps it)", func() {
 			newPolicy(v1.ModeActive, nil) // maxReplicas 50
 			newWorkload("clamped", 48)
-			Expect(store.AddOverride(uidOf("clamped"), override("inc-1", 80))).To(Succeed())
+			Expect(store.AddOverride(uidOf("clamped"), override(inc1, 80))).To(Succeed())
 			eng.Step(ctx)
 
 			Expect(replicasOf("clamped")).To(Equal(int32(50)))
@@ -480,7 +483,7 @@ var _ = Describe("Engine", func() {
 		It("consumes an approve annotation, applies the override, and removes the annotation", func() {
 			newPolicy(v1.ModeActive, nil)
 			newWorkload("approve", 2)
-			Expect(store.AddPending(uidOf("approve"), pending("inc-1", 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
+			Expect(store.AddPending(uidOf("approve"), pending(inc1, 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
 			annotate("approve", v1.AnnoApprove, "inc-1@alice")
 			eng.Step(ctx)
 
@@ -492,7 +495,7 @@ var _ = Describe("Engine", func() {
 			Expect(annotationsOf("approve")).NotTo(HaveKey(v1.AnnoApprove))
 			verdicts := []v1.Verdict{}
 			for _, d := range st.Decisions {
-				if d.Source == v1.SourceAgent && d.IncidentID == "inc-1" {
+				if d.Source == v1.SourceAgent && d.IncidentID == inc1 {
 					verdicts = append(verdicts, d.Verdict)
 				}
 			}
@@ -503,9 +506,9 @@ var _ = Describe("Engine", func() {
 			newPolicy(v1.ModeActive, nil)
 			newWorkload("kc", 2)
 			newWorkload("rej", 2)
-			Expect(store.AddPending(uidOf("kc"), pending("inc-1", 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
+			Expect(store.AddPending(uidOf("kc"), pending(inc1, 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
 			Expect(store.AddPending(uidOf("rej"), pending("inc-2", 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
-			annotate("kc", v1.AnnoApprove, "inc-1")
+			annotate("kc", v1.AnnoApprove, inc1)
 			annotate("rej", v1.AnnoReject, "inc-2@bob")
 			eng.Step(ctx)
 
@@ -525,7 +528,7 @@ var _ = Describe("Engine", func() {
 		It("ignores an approve annotation for an expired approval and records verdict expired", func() {
 			newPolicy(v1.ModeActive, nil)
 			newWorkload("expired", 2)
-			Expect(store.AddPending(uidOf("expired"), pending("inc-1", 6, trough.Add(-time.Minute)))).Error().NotTo(HaveOccurred())
+			Expect(store.AddPending(uidOf("expired"), pending(inc1, 6, trough.Add(-time.Minute)))).Error().NotTo(HaveOccurred())
 			annotate("expired", v1.AnnoApprove, "inc-1@alice")
 			eng.Step(ctx)
 
@@ -535,7 +538,7 @@ var _ = Describe("Engine", func() {
 			Expect(st.PendingApprovals).To(BeEmpty())
 			found := false
 			for _, d := range st.Decisions {
-				found = found || (d.Verdict == v1.VerdictExpired && d.IncidentID == "inc-1")
+				found = found || (d.Verdict == v1.VerdictExpired && d.IncidentID == inc1)
 			}
 			Expect(found).To(BeTrue())
 			Expect(annotationsOf("expired")).NotTo(HaveKey(v1.AnnoApprove))
@@ -546,7 +549,7 @@ var _ = Describe("Engine", func() {
 			newWorkload("restored", 2)
 			tw := &v1.TideWorkload{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: "restored"}, tw)).To(Succeed())
-			tw.Status.Overrides = []v1.Override{override("inc-1", 6)}
+			tw.Status.Overrides = []v1.Override{override(inc1, 6)}
 			tw.Status.PendingApprovals = []v1.PendingApproval{pending("inc-2", 8, trough.Add(10*time.Minute))}
 			Expect(k8sClient.Status().Update(ctx, tw)).To(Succeed())
 			eng.Step(ctx) // store is empty before this step: everything comes from status
@@ -556,12 +559,67 @@ var _ = Describe("Engine", func() {
 			Expect(st.Overrides).To(HaveLen(1))
 			Expect(st.PendingApprovals).To(HaveLen(1))
 			Expect(st.PendingApprovals[0].IncidentID).To(Equal("inc-2"))
+
+			// The restored pending approval must still be approvable.
+			annotate("restored", v1.AnnoApprove, "inc-2@tester")
+			clk.Step(testStep)
+			eng.Step(ctx)
+
+			Expect(replicasOf("restored")).To(Equal(int32(8)))
+			st = statusOf("restored")
+			Expect(st.PendingApprovals).To(BeEmpty())
+			Expect(st.Overrides).To(HaveLen(2))
+			var approved *v1.Override
+			for i := range st.Overrides {
+				if st.Overrides[i].IncidentID == "inc-2" {
+					approved = &st.Overrides[i]
+				}
+			}
+			Expect(approved).NotTo(BeNil())
+			Expect(approved.ApprovedBy).To(Equal("tester"))
+			Expect(annotationsOf("restored")).NotTo(HaveKey(v1.AnnoApprove))
+			m, active := store.Active(uidOf("restored"), clk.Now())
+			Expect(active).NotTo(BeNil())
+			Expect(m).To(Equal(int32(8)))
+		})
+
+		It("keeps approval decisions for the next write when the status write fails", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("retry", 2)
+			fail := true
+			wc, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+			c := interceptor.NewClient(wc, interceptor.Funcs{
+				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					if fail {
+						return errors.New("boom")
+					}
+					return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+				},
+			})
+			e := New(c, Options{
+				Clock: clk, Overrides: store, DefaultTimeToReady: 5 * time.Minute,
+				PromFactory: func(string, time.Duration) (prom.Querier, error) { return q, nil },
+			})
+			Expect(store.AddPending(uidOf("retry"), pending(inc1, 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
+			annotate("retry", v1.AnnoApprove, "inc-1@alice")
+			e.Step(ctx)
+			Expect(statusOf("retry").Decisions).To(BeEmpty())
+
+			fail = false
+			clk.Step(testStep)
+			e.Step(ctx)
+			found := false
+			for _, d := range statusOf("retry").Decisions {
+				found = found || (d.Verdict == v1.VerdictApplied && d.IncidentID == inc1)
+			}
+			Expect(found).To(BeTrue())
 		})
 
 		It("records a RecentOutcome after the override window plus horizon", func() {
 			newPolicy(v1.ModeActive, nil) // horizon 30m
 			newWorkload("scored", 2)
-			o := override("inc-1", 12)
+			o := override(inc1, 12)
 			o.Start, o.End = metav1.NewTime(trough), metav1.NewTime(trough.Add(2*time.Minute))
 			Expect(store.AddOverride(uidOf("scored"), o)).To(Succeed())
 			before := outcomeCount("unneeded")
@@ -578,7 +636,7 @@ var _ = Describe("Engine", func() {
 			st := statusOf("scored")
 			Expect(st.RecentOutcomes).To(HaveLen(1))
 			ro := st.RecentOutcomes[0]
-			Expect(ro.IncidentID).To(Equal("inc-1"))
+			Expect(ro.IncidentID).To(Equal(inc1))
 			Expect(ro.MinReplicas).To(Equal(int32(12)))
 			Expect(ro.Outcome).NotTo(BeNil())
 			Expect(ro.Outcome.Timely).To(BeNil(), "constant load 10 never exceeds the baseline's capacity")
@@ -591,7 +649,7 @@ var _ = Describe("Engine", func() {
 		It("writes baselineReplicas and overrides to status", func() {
 			newPolicy(v1.ModeShadow, nil)
 			newWorkload("persist", 2)
-			Expect(store.AddOverride(uidOf("persist"), override("inc-1", 6))).To(Succeed())
+			Expect(store.AddOverride(uidOf("persist"), override(inc1, 6))).To(Succeed())
 			eng.Step(ctx)
 
 			st := statusOf("persist")
