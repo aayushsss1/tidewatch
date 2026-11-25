@@ -39,7 +39,7 @@ import (
 
 const (
 	kubeContext  = "kind-tidewatch"
-	promPod      = "prometheus-kps-kube-prometheus-stack-prometheus-0"
+	promSvc      = "kps-kube-prometheus-stack-prometheus:9090"
 	workloadName = "frontend-deploy"
 )
 
@@ -74,10 +74,12 @@ func readState(root string) map[string]string {
 	return out
 }
 
-// promQuery runs an instant query at time `at` inside the Prometheus pod and returns the result vector length.
+// promQuery runs an instant query at time `at` through the Prometheus service proxy and returns the result vector length.
 func promQuery(q string, at time.Time) (int, error) {
-	u := "http://localhost:9090/api/v1/query?query=" + url.QueryEscape(q) + "&time=" + strconv.FormatInt(at.Unix(), 10)
-	out, err := kubectl("-n", "monitoring", "exec", promPod, "-c", "prometheus", "--", "wget", "-qO-", u)
+	// Go through the API server service proxy: no tools in the pod, no port-forward.
+	path := "/api/v1/namespaces/monitoring/services/" + promSvc + "/proxy/api/v1/query?query=" +
+		url.QueryEscape(q) + "&time=" + strconv.FormatInt(at.Unix(), 10)
+	out, err := kubectl("get", "--raw", path)
 	if err != nil {
 		return 0, err
 	}
