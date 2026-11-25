@@ -48,12 +48,14 @@ func NewCollector(q prom.Querier) *Collector {
 
 // Update backfills on first call (history window), then fetches (lastT, now] incrementally; trims to history.
 // On a querier error the previous buffer is kept and returned alongside the error.
+//
+// The mutex is not held across the Prometheus query, so different keys update in
+// parallel. Invariant: each key is updated by at most one worker per tick, so the
+// buffer's last timestamp cannot move between the unlocked query and the re-lock.
 func (c *Collector) Update(
 	ctx context.Context, key, query string, history, step time.Duration, now time.Time,
 ) (forecast.Series, GapStats, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	b := c.bufs[key]
 	if b == nil || b.query != query || b.step != step {
 		b = &buffer{query: query, step: step}
@@ -65,14 +67,17 @@ func (c *Collector) Update(
 	if n := len(b.points); n > 0 {
 		start = b.points[n-1].T.Add(step)
 	}
-	var qerr error
 	if start.After(now) {
+		defer c.mu.Unlock()
 		return c.snapshot(b, capacity)
 	}
-	fetched, err := c.q.RangeSeries(ctx, query, start, now, step)
-	if err != nil {
-		qerr = err
-	} else {
+	c.mu.Unlock()
+
+	fetched, qerr := c.q.RangeSeries(ctx, query, start, now, step)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if qerr == nil {
 		for _, p := range fetched.Points {
 			if n := len(b.points); n > 0 && !p.T.After(b.points[n-1].T) {
 				continue

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -189,5 +190,36 @@ func TestCollector_NoValidSamplesIsUnhealthy(t *testing.T) {
 	_, g, _ := c.Update(context.Background(), "k", "q", history, step, t0)
 	if g.Healthy() {
 		t.Fatalf("gaps = %+v, want unhealthy", g)
+	}
+}
+
+type slowQuerier struct{ fakeQuerier }
+
+func (s *slowQuerier) RangeSeries(
+	ctx context.Context, query string, start, end time.Time, step time.Duration,
+) (forecast.Series, error) {
+	time.Sleep(100 * time.Millisecond)
+	// fakeQuerier appends to calls unsynchronized; call the pure part directly.
+	out := forecast.Series{Step: step}
+	for t := start; !t.After(end); t = t.Add(step) {
+		out.Points = append(out.Points, forecast.Point{T: t, V: 1})
+	}
+	return out, nil
+}
+
+func TestCollector_UpdatesDifferentKeysConcurrently(t *testing.T) {
+	c := NewCollector(&slowQuerier{})
+	start := time.Now()
+	var wg sync.WaitGroup
+	for _, k := range []string{"a", "b"} {
+		wg.Go(func() {
+			if _, _, err := c.Update(context.Background(), k, "q", history, step, t0); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if d := time.Since(start); d >= 180*time.Millisecond {
+		t.Fatalf("updates serialized: took %v, want < 180ms", d)
 	}
 }
