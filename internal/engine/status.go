@@ -77,7 +77,12 @@ func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
 		s.LastAction = verb + " " + strconv.Itoa(int(it.scale.Replicas)) + "→" +
 			strconv.Itoa(int(d.Final)) + " (" + string(d.Source) + ")"
 	}
-	s.LastScaleUpTime, s.LastScaleDownTime = optTime(st.lastUp), optTime(st.lastDown)
+	if t := optTime(st.lastUp); t != nil {
+		s.LastScaleUpTime = t
+	}
+	if t := optTime(st.lastDown); t != nil {
+		s.LastScaleDownTime = t
+	}
 
 	if it.forecasting.Type != "" {
 		meta.SetStatusCondition(&s.Conditions, it.forecasting)

@@ -37,6 +37,7 @@ type wlState struct {
 	lastApplied      *int32
 	lastUp, lastDown time.Time
 	recs             []TimedReplicas
+	seeded           bool // recs seeded from the first observed replica count
 
 	lastRun     time.Time // wall (clock) time of the last evaluation
 	lastAligned time.Time // step-aligned time of the last Record/Observe

@@ -183,6 +183,13 @@ func (e *Engine) stateFor(tw *v1.TideWorkload) *wlState {
 			namespace: tw.Namespace, name: tw.Name,
 			hw: forecast.NewHoltWinters(forecast.HoltWintersOptions{}),
 		}
+		// Survive operator restarts: cooldowns keep counting from the recorded times.
+		if t := tw.Status.LastScaleUpTime; t != nil {
+			st.lastUp = t.Time
+		}
+		if t := tw.Status.LastScaleDownTime; t != nil {
+			st.lastDown = t.Time
+		}
 		e.states[tw.UID] = st
 	}
 	return st
@@ -255,6 +262,12 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 	started := time.Now()
 	st.lastRun = wall
 	st.replicas = scale.Replicas
+	if !st.seeded {
+		// A fresh state has no recommendation history; seeding it with the current
+		// replicas makes a scale-down wait one stabilization window after a restart.
+		st.seeded = true
+		st.recs = []TimedReplicas{{T: wall.Truncate(step), Replicas: scale.Replicas}}
+	}
 	it := &item{
 		tw: tw, pol: &pol, target: target, st: st, scale: scale, step: step, horizon: horizon,
 		now: wall.Truncate(step), actual: math.NaN(),

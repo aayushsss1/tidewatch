@@ -279,6 +279,34 @@ var _ = Describe("Engine", func() {
 		Expect(found).To(BeTrue())
 	})
 
+	Context("after a restart (fresh engine state)", func() {
+		BeforeEach(func() { q.load = func(time.Time) float64 { return 10 } }) // wants 2 replicas
+
+		It("holds a scale-down by cooldown when status records a recent scale-down", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("restart-cd", 6)
+			tw := &v1.TideWorkload{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: "restart-cd"}, tw)).To(Succeed())
+			tw.Status.LastScaleDownTime = ptr.To(metav1.NewTime(clk.Now().Add(-10 * time.Second)))
+			Expect(k8sClient.Status().Update(ctx, tw)).To(Succeed())
+			eng.Step(ctx)
+
+			Expect(replicasOf("restart-cd")).To(Equal(int32(6)))
+			st := statusOf("restart-cd")
+			Expect(st.Decisions[0].Reasons).To(ContainElement(reasonCooldown))
+			Expect(st.LastScaleDownTime).NotTo(BeNil(), "existing timestamp must be preserved")
+		})
+
+		It("waits one stabilization window before the first scale-down", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("restart-stab", 6)
+			eng.Step(ctx)
+
+			Expect(replicasOf("restart-stab")).To(Equal(int32(6)))
+			Expect(statusOf("restart-stab").Decisions[0].Verdict).To(Equal(v1.VerdictHeld))
+		})
+	})
+
 	Context("with degraded data", func() {
 		// 40 of 181 points missing in the middle: unhealthy, but the last point is valid.
 		gappy := func(last float64) func(time.Time) float64 {
