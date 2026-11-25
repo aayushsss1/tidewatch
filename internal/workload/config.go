@@ -4,6 +4,8 @@ package workload
 import (
 	"bytes"
 	"fmt"
+	"math"
+	"regexp"
 	"strconv"
 	"text/template"
 
@@ -42,9 +44,9 @@ func Effective(
 		cfg.MinReplicas = *spec.Guardrails.MinReplicas
 	}
 	if spec.Load.Headroom != "" {
-		h, err := strconv.ParseFloat(spec.Load.Headroom, 64)
-		if err != nil {
-			return cfg, fmt.Errorf("invalid headroom %q: %w", spec.Load.Headroom, err)
+		h, err := parseDecimal(spec.Load.Headroom)
+		if err != nil || h > 1 {
+			return cfg, fmt.Errorf("invalid headroom %q: must be a decimal in (0, 1]", spec.Load.Headroom)
 		}
 		cfg.Headroom = h
 	}
@@ -57,39 +59,41 @@ func Effective(
 	if !ok {
 		return cfg, fmt.Errorf("load profile %q not found in policy", name)
 	}
-	tpr, err := strconv.ParseFloat(profile.TargetPerReplica, 64)
+	tpr, err := parseDecimal(profile.TargetPerReplica)
 	if err != nil {
 		return cfg, fmt.Errorf("invalid targetPerReplica %q in profile %q: %w", profile.TargetPerReplica, name, err)
 	}
 	cfg.TargetPerReplica = tpr
 	if v, ok := annos[v1.AnnoTargetPerRep]; ok {
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil || f <= 0 {
+		f, err := parseDecimal(v)
+		if err != nil {
 			return cfg, fmt.Errorf("annotation %s must be a decimal > 0, got %q", v1.AnnoTargetPerRep, v)
 		}
 		cfg.TargetPerReplica = f
 	}
 
-	if v, ok := annos[v1.AnnoMinReplicas]; ok {
-		switch n, err := strconv.ParseInt(v, 10, 32); {
-		case err != nil:
-			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("min-replicas %q is not an integer; ignored", v))
-		case int32(n) < cfg.MinReplicas:
-			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("min-replicas %d is below policy min %d; ignored", n, cfg.MinReplicas))
-		default:
-			cfg.MinReplicas = int32(n)
-		}
-	}
+	// max first, so the min check sees the effective max and the pair can never invert.
+	policyMin := cfg.MinReplicas
 	if v, ok := annos[v1.AnnoMaxReplicas]; ok {
 		switch n, err := strconv.ParseInt(v, 10, 32); {
 		case err != nil:
 			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("max-replicas %q is not an integer; ignored", v))
-		case int32(n) > cfg.MaxReplicas:
-			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("max-replicas %d exceeds policy max %d; ignored", n, cfg.MaxReplicas))
+		case n < 1 || int32(n) < policyMin || int32(n) > cfg.MaxReplicas:
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+				"max-replicas %d outside allowed range [%d, %d]; ignored", n, max(policyMin, 1), cfg.MaxReplicas))
 		default:
 			cfg.MaxReplicas = int32(n)
+		}
+	}
+	if v, ok := annos[v1.AnnoMinReplicas]; ok {
+		switch n, err := strconv.ParseInt(v, 10, 32); {
+		case err != nil:
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("min-replicas %q is not an integer; ignored", v))
+		case int32(n) < policyMin || int32(n) > cfg.MaxReplicas:
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+				"min-replicas %d outside allowed range [%d, %d]; ignored", n, policyMin, cfg.MaxReplicas))
+		default:
+			cfg.MinReplicas = int32(n)
 		}
 	}
 
@@ -104,4 +108,18 @@ func Effective(
 	}
 	cfg.Query = buf.String()
 	return cfg, nil
+}
+
+var decimalRE = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+
+// parseDecimal parses a plain decimal (matching the CRD pattern) that is finite and > 0.
+func parseDecimal(s string) (float64, error) {
+	if !decimalRE.MatchString(s) {
+		return 0, fmt.Errorf("%q is not a plain decimal", s)
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) || f <= 0 {
+		return 0, fmt.Errorf("%q must be a finite number > 0", s)
+	}
+	return f, nil
 }

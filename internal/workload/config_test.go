@@ -119,3 +119,63 @@ func TestEffective_PausedByPolicyOrWorkload(t *testing.T) {
 		}
 	}
 }
+
+func TestEffective_TargetPerReplicaRejectsNonDecimal(t *testing.T) {
+	for _, bad := range []string{"NaN", "Inf", "+Inf", "1e3", "0x10", "+5", "0", "-5", ""} {
+		if _, err := Effective(spec(new(int32(1))), false, obj(map[string]string{v1.AnnoTargetPerRep: bad}), "D"); err == nil {
+			t.Errorf("annotation %q: expected error", bad)
+		}
+		s := spec(new(int32(1)))
+		s.Load.Profiles["http"] = v1.LoadProfile{Query: "q", TargetPerReplica: bad}
+		if _, err := Effective(s, false, obj(nil), "D"); err == nil {
+			t.Errorf("profile %q: expected error", bad)
+		}
+	}
+}
+
+func TestEffective_HeadroomValidation(t *testing.T) {
+	for _, bad := range []string{"0", "NaN", "1e0", "1.5", "-1"} {
+		s := spec(new(int32(1)))
+		s.Load.Headroom = bad
+		if _, err := Effective(s, false, obj(nil), "D"); err == nil {
+			t.Errorf("headroom %q: expected error", bad)
+		}
+	}
+	s := spec(new(int32(1)))
+	s.Load.Headroom = "1"
+	if got, err := Effective(s, false, obj(nil), "D"); err != nil || got.Headroom != 1 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func eff(t *testing.T, minR int32, annos map[string]string) EffectiveConfig {
+	t.Helper()
+	got, err := Effective(spec(new(minR)), false, obj(annos), "D")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestEffective_ReplicaAnnotationBounds(t *testing.T) {
+	cases := map[string]struct {
+		minR      int32
+		annos     map[string]string
+		min, max  int32
+		wantWarns int
+	}{
+		"max zero":      {0, map[string]string{v1.AnnoMaxReplicas: "0"}, 0, 10, 1},
+		"max negative":  {1, map[string]string{v1.AnnoMaxReplicas: "-3"}, 1, 10, 1},
+		"max below min": {4, map[string]string{v1.AnnoMaxReplicas: "2"}, 4, 10, 1},
+		"min above max": {1, map[string]string{v1.AnnoMinReplicas: "50"}, 1, 10, 1},
+		"inverted pair": {1, map[string]string{v1.AnnoMinReplicas: "8", v1.AnnoMaxReplicas: "5"}, 1, 5, 1},
+		"tight min":     {1, map[string]string{v1.AnnoMinReplicas: "3"}, 3, 10, 0},
+		"tight both":    {1, map[string]string{v1.AnnoMinReplicas: "3", v1.AnnoMaxReplicas: "6"}, 3, 6, 0},
+	}
+	for name, c := range cases {
+		got := eff(t, c.minR, c.annos)
+		if got.MinReplicas != c.min || got.MaxReplicas != c.max || len(got.Warnings) != c.wantWarns {
+			t.Errorf("%s: got %+v", name, got)
+		}
+	}
+}
