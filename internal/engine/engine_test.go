@@ -243,6 +243,59 @@ var _ = Describe("Engine", func() {
 		Expect(found).To(BeTrue())
 	})
 
+	Context("with degraded data", func() {
+		// 40 of 181 points missing in the middle: unhealthy, but the last point is valid.
+		gappy := func(last float64) func(time.Time) float64 {
+			return func(t time.Time) float64 {
+				if t.Equal(trough) {
+					return last
+				}
+				if age := trough.Sub(t); age >= 60*time.Minute && age < 100*time.Minute {
+					return math.NaN()
+				}
+				return cosine(t)
+			}
+		}
+
+		It("never scales down on unhealthy gaps and reports Forecasting=False", func() {
+			q.load = gappy(5) // reactive floor 1, current 6
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("gappy-low", 6)
+			eng.Step(ctx)
+
+			Expect(replicasOf("gappy-low")).To(Equal(int32(6)))
+			st := statusOf("gappy-low")
+			Expect(st.Decisions[0].Verdict).To(Equal(v1.VerdictHeld))
+			cond := meta.FindStatusCondition(st.Conditions, v1.CondForecasting)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("insufficient_data"))
+		})
+
+		It("never scales down when the latest point is NaN", func() {
+			q.load = func(t time.Time) float64 {
+				if trough.Sub(t) < 2*time.Minute {
+					return math.NaN()
+				}
+				return cosine(t)
+			}
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("nan-last", 6)
+			eng.Step(ctx)
+
+			Expect(replicasOf("nan-last")).To(Equal(int32(6)))
+		})
+
+		It("still scales up on unhealthy gaps", func() {
+			q.load = gappy(80) // reactive floor 10
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("gappy-high", 6)
+			eng.Step(ctx)
+
+			Expect(replicasOf("gappy-high")).To(BeNumerically(">", 6))
+		})
+	})
+
 	It("skips workloads whose target is missing", func() {
 		newPolicy(v1.ModeActive, nil)
 		newWorkload("orphan", 2)

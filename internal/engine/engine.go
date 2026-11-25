@@ -303,6 +303,10 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		Now: it.now, Actual: it.actual, Trusted: it.trusted,
 		TimeToReady: st.ttr.P90(e.opts.DefaultTimeToReady), Margin: 2 * step, Config: cfg,
 	})
+	if !gaps.Healthy() || math.IsNaN(it.actual) {
+		// Degraded data may only scale up: never shrink on a partial view.
+		it.base.Desired = max(it.base.Desired, scale.Replicas)
+	}
 	if !it.base.OK {
 		e.unavailable(it, reasonNoData, "load series has no data")
 		return it
