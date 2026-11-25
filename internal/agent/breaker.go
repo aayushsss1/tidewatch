@@ -25,6 +25,7 @@ type Breaker struct {
 	failures  int
 	openedAt  time.Time
 	trial     bool // half-open trial handed out
+	trialAt   time.Time
 }
 
 // NewBreaker opens after threshold consecutive failures, for the open duration.
@@ -33,7 +34,8 @@ func NewBreaker(threshold int, open time.Duration, clk clock.Clock) *Breaker {
 }
 
 // Allow reports whether a call may proceed. After the open duration it admits
-// exactly one trial call until Success or Failure is reported.
+// exactly one trial call. Every admitted call must be followed by exactly one
+// of Success, Failure or Release.
 func (b *Breaker) Allow() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -42,13 +44,14 @@ func (b *Breaker) Allow() bool {
 		if b.clk.Since(b.openedAt) < b.openFor {
 			return false
 		}
-		b.state, b.trial = stateHalfOpen, true
+		b.state, b.trial, b.trialAt = stateHalfOpen, true, b.clk.Now()
 		return true
 	case stateHalfOpen:
-		if b.trial {
+		// An unreported trial is re-admitted after openFor as a safety net.
+		if b.trial && b.clk.Since(b.trialAt) < b.openFor {
 			return false
 		}
-		b.trial = true
+		b.trial, b.trialAt = true, b.clk.Now()
 		return true
 	}
 	return true
@@ -69,6 +72,14 @@ func (b *Breaker) Failure() {
 	if b.state == stateHalfOpen || b.failures >= b.threshold {
 		b.state, b.openedAt, b.trial = stateOpen, b.clk.Now(), false
 	}
+}
+
+// Release clears an outstanding half-open trial without counting it as a
+// success or failure (cancelled, superseded or skipped after Allow).
+func (b *Breaker) Release() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.trial = false
 }
 
 // Open reports whether the breaker is not closed (open or awaiting its trial).

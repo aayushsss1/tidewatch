@@ -161,3 +161,22 @@ func TestManager_StormEndsAfterQuiet(t *testing.T) {
 		t.Fatal("new trigger after storm should be normal")
 	}
 }
+
+func TestManager_StormInvestigatedOnce(t *testing.T) {
+	m, clk := newMgr()
+	var storm *Incident
+	for i := range 25 {
+		storm, _ = m.Add(trig("shop", fmt.Sprintf("w%d", i), clk.Now()))
+	}
+	if r := m.TakeReady(); len(r) != 1 {
+		t.Fatalf("ready=%d", len(r))
+	}
+	m.SetStatus(storm.ID, StatusDecided)
+	inc, _ := m.Add(trig("shop", "late", clk.Now()))
+	if !inc.Storm || len(inc.Members) != 6 {
+		t.Fatal("later triggers must still attach")
+	}
+	if r := m.TakeReady(); len(r) != 0 {
+		t.Fatalf("storm re-queued: %d", len(r))
+	}
+}

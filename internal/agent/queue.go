@@ -5,6 +5,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"k8s.io/utils/clock"
 )
 
 type qItem struct {
@@ -39,11 +41,21 @@ type Queue struct {
 	h       qHeap
 	seq     int
 	dropped []*Incident
+	clk     clock.Clock
 }
 
+// QueueOption configures a Queue.
+type QueueOption func(*Queue)
+
+// WithClock sets the clock used for deadline checks.
+func WithClock(c clock.Clock) QueueOption { return func(q *Queue) { q.clk = c } }
+
 // NewQueue returns an empty Queue.
-func NewQueue() *Queue {
-	q := &Queue{}
+func NewQueue(opts ...QueueOption) *Queue {
+	q := &Queue{clk: clock.RealClock{}}
+	for _, o := range opts {
+		o(q)
+	}
 	q.cond = sync.NewCond(&q.mu)
 	return q
 }
@@ -74,7 +86,7 @@ func (q *Queue) Pop(ctx context.Context) (*Incident, time.Time, bool) {
 		}
 		for q.h.Len() > 0 {
 			it := heap.Pop(&q.h).(*qItem)
-			if !time.Now().Before(it.deadline) {
+			if !q.clk.Now().Before(it.deadline) {
 				q.dropped = append(q.dropped, it.inc)
 				continue
 			}

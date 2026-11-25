@@ -51,3 +51,39 @@ func TestBreaker_OpensAfterFiveAndHalfOpens(t *testing.T) {
 		t.Fatal("success should close")
 	}
 }
+
+func openBreaker(clk *clocktesting.FakeClock) *Breaker {
+	b := NewBreaker(1, 2*time.Minute, clk)
+	b.Failure()
+	clk.Step(2 * time.Minute)
+	return b
+}
+
+func TestBreaker_ReleaseClearsTrial(t *testing.T) {
+	clk := clocktesting.NewFakeClock(t0)
+	b := openBreaker(clk)
+	if !b.Allow() || b.Allow() {
+		t.Fatal("one trial expected")
+	}
+	b.Release()
+	if !b.Open() {
+		t.Fatal("release must not close the breaker")
+	}
+	if !b.Allow() {
+		t.Fatal("trial should be re-admitted after Release")
+	}
+}
+
+func TestBreaker_UnreportedTrialReadmittedAfterOpenDuration(t *testing.T) {
+	clk := clocktesting.NewFakeClock(t0)
+	b := openBreaker(clk)
+	b.Allow()
+	clk.Step(119 * time.Second)
+	if b.Allow() {
+		t.Fatal("trial still outstanding")
+	}
+	clk.Step(time.Second)
+	if !b.Allow() {
+		t.Fatal("safety net should re-admit")
+	}
+}

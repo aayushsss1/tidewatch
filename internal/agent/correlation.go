@@ -16,7 +16,7 @@ import (
 const (
 	maxLag       = 10 * time.Minute
 	corrCacheTTL = 10 * time.Minute
-	minOverlap   = 3
+	minOverlap   = 8
 )
 
 // SeriesSource returns the recent load series of a workload.
@@ -39,6 +39,7 @@ type Correlator struct {
 	clk   clock.Clock
 	mu    sync.Mutex
 	cache map[pairKey]pairVal
+	swept time.Time
 }
 
 // NewCorrelator returns a Correlator reading series from src.
@@ -55,6 +56,7 @@ func (c *Correlator) Related(a, b types.UID) (corr float64, lag time.Duration, o
 	now := c.clk.Now()
 	k := pairKey{a, b}
 	c.mu.Lock()
+	c.prune(now)
 	if v, hit := c.cache[k]; hit && now.Sub(v.at) < corrCacheTTL {
 		c.mu.Unlock()
 		return v.corr, v.lag, v.ok
@@ -75,6 +77,19 @@ func (c *Correlator) Related(a, b types.UID) (corr float64, lag time.Duration, o
 	c.cache[k] = v
 	c.mu.Unlock()
 	return v.corr, v.lag, v.ok
+}
+
+// prune drops expired entries, at most once per TTL. Callers hold c.mu.
+func (c *Correlator) prune(now time.Time) {
+	if now.Sub(c.swept) < corrCacheTTL {
+		return
+	}
+	c.swept = now
+	for k, v := range c.cache {
+		if now.Sub(v.at) >= corrCacheTTL {
+			delete(c.cache, k)
+		}
+	}
 }
 
 // LaggedCorrelation returns the highest Pearson correlation between a and b

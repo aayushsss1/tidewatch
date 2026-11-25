@@ -93,3 +93,20 @@ func TestCorrelator_CachesAndMissingData(t *testing.T) {
 		t.Fatal("missing series must give ok=false")
 	}
 }
+
+func TestCorrelator_PrunesStaleEntries(t *testing.T) {
+	a := wave(40)
+	src := &fakeSrc{m: map[types.UID]forecast.Series{"a": mkSeries(time.Minute, a), "b": mkSeries(time.Minute, a), "c": mkSeries(time.Minute, a)}}
+	clk := clocktesting.NewFakeClock(t0)
+	c := NewCorrelator(src, clk)
+	c.Related("a", "b")
+	c.Related("a", "c")
+	if len(c.cache) != 2 {
+		t.Fatal(len(c.cache))
+	}
+	clk.Step(11 * time.Minute)
+	c.Related("b", "c")
+	if len(c.cache) != 1 {
+		t.Fatalf("cache=%d", len(c.cache))
+	}
+}

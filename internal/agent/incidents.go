@@ -44,6 +44,7 @@ type Incident struct {
 	LastTrigger time.Time
 	Status      Status
 	Pending     bool // new triggers since last queued
+	taken       bool // storm incidents are investigated at most once
 }
 
 func (i *Incident) clone() *Incident {
@@ -201,8 +202,11 @@ func (m *Manager) TakeReady() []*Incident {
 		if m.storm != nil && in != m.storm {
 			continue
 		}
+		if in.Storm && in.taken {
+			continue
+		}
 		if in.Pending && (in.Status == StatusOpen || in.Status == StatusDecided) {
-			in.Pending = false
+			in.Pending, in.taken = false, true
 			out = append(out, in.clone())
 		}
 	}

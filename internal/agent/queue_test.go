@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	clocktesting "k8s.io/utils/clock/testing"
 )
 
 func inc(id string) *Incident { return &Incident{ID: id} }
@@ -72,5 +74,17 @@ func TestQueue_PopWakesOnPush(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Pop did not wake")
+	}
+}
+
+func TestQueue_WithClock(t *testing.T) {
+	clk := clocktesting.NewFakeClock(t0)
+	q := NewQueue(WithClock(clk))
+	q.Push(inc("a"), 1, t0.Add(time.Minute))
+	clk.Step(2 * time.Minute)
+	q.Push(inc("b"), 0.5, t0.Add(time.Hour))
+	got, _, ok := q.Pop(context.Background())
+	if !ok || got.ID != "b" || len(q.Dropped()) != 1 {
+		t.Fatalf("got %v", got)
 	}
 }
