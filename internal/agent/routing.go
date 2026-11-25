@@ -30,17 +30,32 @@ func sortedUIDs[V any](m map[types.UID]V) []types.UID {
 	return uids
 }
 
-func (iv *Investigator) outcome(uid types.UID, incident string, verdict v1.Verdict, min int32, now time.Time) {
+// outcome records the proposal for the outcome history and, as a decision, for
+// the engine to write to the workload's status.
+func (iv *Investigator) outcome(uid types.UID, d decisionInfo, verdict v1.Verdict, min int32) {
 	iv.Store.AddOutcome(uid, v1.RecentOutcome{
-		IncidentID: incident, Time: metav1.NewTime(now), Verdict: verdict, MinReplicas: min,
+		IncidentID: d.incident, Time: metav1.NewTime(d.now), Verdict: verdict, MinReplicas: min,
+	})
+	iv.Store.AddDecision(uid, v1.Decision{
+		Time: metav1.NewTime(d.now), Source: v1.SourceAgent, Desired: min, Final: min, Verdict: verdict,
+		Reasons: slices.Clone(d.reasons), IncidentID: d.incident, PromptVersion: PromptVersion,
+		Provider: iv.Provider.Name(), Model: iv.Provider.Model(), Trace: slices.Clone(d.trace),
 	})
 }
 
+// decisionInfo is what every recorded decision of one investigation shares.
+type decisionInfo struct {
+	incident string
+	reasons  []string
+	trace    []v1.TraceEntry
+	now      time.Time
+}
+
 // recordRejected notes a proposal that failed validation as a rejected outcome.
-func (iv *Investigator) recordRejected(inc *Incident, p tools.Proposal, now time.Time) {
+func (iv *Investigator) recordRejected(inc *Incident, p tools.Proposal, d decisionInfo) {
 	for _, po := range p.Overrides {
 		if uid, ok := memberUID(inc, po.Workload); ok {
-			iv.outcome(uid, inc.ID, v1.VerdictRejected, po.MinReplicas, now)
+			iv.outcome(uid, d, v1.VerdictRejected, po.MinReplicas)
 		}
 	}
 }
@@ -49,8 +64,9 @@ func (iv *Investigator) recordRejected(inc *Incident, p tools.Proposal, now time
 // and records an outcome for each. It returns the verdict.
 func (iv *Investigator) route(
 	ctx context.Context, inc *Incident, pol *v1.TidePolicy, p tools.Proposal,
-	ovs map[types.UID]v1.Override, trace []v1.TraceEntry, now time.Time,
+	ovs map[types.UID]v1.Override, d decisionInfo,
 ) v1.Verdict {
+	now, trace := d.now, d.trace
 	log := logf.FromContext(ctx).WithName("agent").WithValues("incident", inc.ID)
 	notifier := iv.notifier()
 	uids := sortedUIDs(ovs)
@@ -58,7 +74,7 @@ func (iv *Investigator) route(
 	switch {
 	case pol.Spec.Mode == v1.ModeShadow || iv.Engine.DryRun():
 		for _, uid := range uids {
-			iv.outcome(uid, inc.ID, v1.VerdictShadow, ovs[uid].MinReplicas, now)
+			iv.outcome(uid, d, v1.VerdictShadow, ovs[uid].MinReplicas)
 		}
 		return v1.VerdictShadow
 
@@ -70,11 +86,12 @@ func (iv *Investigator) route(
 				continue
 			}
 			applied[uid] = ovs[uid]
-			iv.outcome(uid, inc.ID, v1.VerdictApplied, ovs[uid].MinReplicas, now)
+			iv.outcome(uid, d, v1.VerdictApplied, ovs[uid].MinReplicas)
 		}
-		if len(applied) > 0 {
-			notifier.Applied(ctx, inc, applied, true)
+		if len(applied) == 0 {
+			return ""
 		}
+		notifier.Applied(ctx, inc, applied, true)
 		return v1.VerdictApplied
 	}
 
@@ -95,11 +112,12 @@ func (iv *Investigator) route(
 			continue
 		}
 		pend[uid] = pa
-		iv.outcome(uid, inc.ID, v1.VerdictPending, o.MinReplicas, now)
+		iv.outcome(uid, d, v1.VerdictPending, o.MinReplicas)
 	}
-	if len(pend) > 0 {
-		notifier.Pending(ctx, inc, pend)
+	if len(pend) == 0 {
+		return ""
 	}
+	notifier.Pending(ctx, inc, pend)
 	return v1.VerdictPending
 }
 

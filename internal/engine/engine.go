@@ -299,6 +299,9 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 	defer func() { it.dur = time.Since(started) }()
 	it.events, st.events = st.events, nil
 	e.consumeAnnotations(ctx, it)
+	if e.ov != nil { // decisions recorded by the agent investigator, oldest first
+		it.events = append(it.events, e.ov.TakeDecisions(tw.UID)...)
+	}
 	st.ttr.Observe(it.now, scale.Ready)
 
 	cfg, err := workload.Effective(pol.Spec, pol.Annotations[v1.AnnoPaused] == "true", target.Object, target.Ref.Kind)

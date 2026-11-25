@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -28,7 +30,9 @@ type Notifier interface {
 	Applied(ctx context.Context, inc *Incident, ovs map[types.UID]v1.Override, auto bool)
 	Resolved(ctx context.Context, incidentID string, verdict v1.Verdict, by string)
 	Skipped(ctx context.Context, inc *Incident, reason string)
-	Storm(ctx context.Context, triggers int)
+	// Storm reports a trigger storm. A nil policy means it spans all policies:
+	// then only Slack and the metric are used, with no Event.
+	Storm(ctx context.Context, policy *v1.PolicyRef, triggers int)
 }
 
 // NoopNotifier discards every notification.
@@ -38,7 +42,7 @@ func (NoopNotifier) Pending(context.Context, *Incident, map[types.UID]v1.Pending
 func (NoopNotifier) Applied(context.Context, *Incident, map[types.UID]v1.Override, bool)  {}
 func (NoopNotifier) Resolved(context.Context, string, v1.Verdict, string)                 {}
 func (NoopNotifier) Skipped(context.Context, *Incident, string)                           {}
-func (NoopNotifier) Storm(context.Context, int)                                           {}
+func (NoopNotifier) Storm(context.Context, *v1.PolicyRef, int)                            {}
 
 // slackTimeout bounds every webhook call.
 const slackTimeout = 5 * time.Second
@@ -141,6 +145,12 @@ func (n *notifier) post(ctx context.Context, text string) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := n.http.Do(req)
 	if err != nil {
+		// A *url.Error carries the full webhook URL, which is a secret: log only its cause.
+		if ue, ok := errors.AsType[*url.Error](err); ok {
+			err = ue.Err
+		} else {
+			err = errors.New("request failed")
+		}
 		log.Error(err, "Posting to Slack")
 		return
 	}
@@ -247,16 +257,13 @@ func (n *notifier) Skipped(_ context.Context, inc *Incident, reason string) {
 	}
 }
 
-func (n *notifier) Storm(ctx context.Context, triggers int) {
+func (n *notifier) Storm(ctx context.Context, policy *v1.PolicyRef, triggers int) {
 	stormGauge.Set(1)
+	if policy != nil {
+		n.rec.Eventf(&v1.TidePolicy{ObjectMeta: metav1.ObjectMeta{Namespace: policy.Namespace, Name: policy.Name}},
+			corev1.EventTypeWarning, reasonStormEvent, "Trigger storm: %d triggers within 2 minutes", triggers)
+	}
 	n.post(ctx, fmt.Sprintf("Tidewatch storm mode: %d triggers within 2 minutes; investigating once for all policies", triggers))
-}
-
-// StormOnPolicy records the StormDetected event on a policy. Storm itself has
-// no policy to name, so the runner calls this for the policy that tipped it.
-func (n *notifier) StormOnPolicy(policy v1.PolicyRef, triggers int) {
-	n.rec.Eventf(&v1.TidePolicy{ObjectMeta: metav1.ObjectMeta{Namespace: policy.Namespace, Name: policy.Name}},
-		corev1.EventTypeWarning, reasonStormEvent, "Trigger storm: %d triggers within 2 minutes", triggers)
 }
 
 func truncRunes(s string, n int) string {

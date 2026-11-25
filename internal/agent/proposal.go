@@ -46,6 +46,10 @@ func ValidateProposal(
 		if start.Before(now) {
 			start = now
 		}
+		if latest := now.Add(maxStartAhead); start.After(latest) {
+			start = latest
+			note(reasonWindowClamp)
+		}
 		end := po.End
 		switch {
 		case end.IsZero():
@@ -53,6 +57,9 @@ func ValidateProposal(
 			note(reasonWindowClamp)
 		case !end.After(now):
 			note(reasonEnded)
+			continue
+		case !end.After(start):
+			note(reasonInvalidWindow)
 			continue
 		case end.Sub(start) > maxOverrideWindow:
 			end = start.Add(maxOverrideWindow)

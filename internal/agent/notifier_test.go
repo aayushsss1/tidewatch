@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -92,7 +94,7 @@ func TestNotifier_NoWebhookNoPost(t *testing.T) {
 	n.Pending(context.Background(), inc, pend)
 	n.Applied(context.Background(), inc, map[types.UID]v1.Override{"u1": pend["u1"].Override}, true)
 	n.Resolved(context.Background(), testInc7, v1.VerdictExpired, "")
-	n.Storm(context.Background(), 25)
+	n.Storm(context.Background(), nil, 25)
 	if len(sink.bodies) != 0 {
 		t.Fatalf("posted %d messages without a webhook", len(sink.bodies))
 	}
@@ -109,7 +111,7 @@ func TestNotifier_SlackFailureDoesNotPanicOrReturn(t *testing.T) {
 	}
 	srv.Close()
 	n.Pending(context.Background(), inc, pend) // connection refused
-	n.Storm(context.Background(), 30)
+	n.Storm(context.Background(), nil, 30)
 }
 
 func TestNotifier_EmitsEvents(t *testing.T) {
@@ -127,7 +129,8 @@ func TestNotifier_EmitsEvents(t *testing.T) {
 	n.Resolved(ctx, testInc7, v1.VerdictRejected, "bob")
 	n.Pending(ctx, inc, pend)
 	n.Resolved(ctx, testInc7, v1.VerdictExpired, "")
-	n.(*notifier).StormOnPolicy(inc.Policy, 25)
+	n.Storm(ctx, nil, 3) // no policy: no event
+	n.Storm(ctx, &inc.Policy, 25)
 
 	close(rec.Events)
 	var got []string
@@ -185,5 +188,35 @@ func TestMetrics_RegisterOnceAndLabels(t *testing.T) {
 		if got := resultLabel(want); got != r {
 			t.Errorf("resultLabel(%+v) = %q, want %q", want, got, r)
 		}
+	}
+}
+
+func TestNotifier_SlackErrorLogDoesNotLeakWebhookURL(t *testing.T) {
+	const token = "T0KEN/B123/SECRETSECRET"
+	srv := httptest.NewServer(http.NotFoundHandler())
+	hook := srv.URL + "/services/" + token
+	srv.Close() // connection refused: Do returns a *url.Error holding the full URL
+
+	var mu sync.Mutex
+	var logs []string
+	sink := funcr.New(func(prefix, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		logs = append(logs, prefix+" "+args)
+	}, funcr.Options{})
+	ctx := logr.NewContext(context.Background(), sink)
+
+	n := NewNotifier(record.NewFakeRecorder(10), hook, nil)
+	inc, pend := notifIncident()
+	n.Pending(ctx, inc, pend)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logs) == 0 {
+		t.Fatal("expected an error log for the failed post")
+	}
+	all := strings.Join(logs, "\n")
+	if strings.Contains(all, token) || strings.Contains(all, hook) || strings.Contains(all, "/services/") {
+		t.Fatalf("webhook URL leaked into logs:\n%s", all)
 	}
 }

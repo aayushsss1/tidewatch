@@ -24,6 +24,7 @@ const (
 	MaxOverrides  = 3
 	MaxPending    = 3
 	MaxOutcomes   = 10
+	MaxDecisions  = 10
 	maxTombstones = 128
 )
 
@@ -31,6 +32,7 @@ type workloadData struct {
 	overrides []v1.Override
 	pending   []v1.PendingApproval
 	outcomes  []v1.RecentOutcome // newest first
+	decisions []v1.Decision      // oldest first, awaiting a status write
 }
 
 type tombstone struct {
@@ -364,4 +366,31 @@ func (s *Store) Forget(uid types.UID) {
 	defer s.mu.Unlock()
 	delete(s.data, uid)
 	delete(s.dirty, uid)
+}
+
+// AddDecision queues an agent decision for the engine's next status write of
+// uid. At most MaxDecisions are kept; the oldest are dropped.
+func (s *Store) AddDecision(uid types.UID, d v1.Decision) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w := s.wl(uid)
+	w.decisions = append(w.decisions, *d.DeepCopy())
+	if len(w.decisions) > MaxDecisions {
+		w.decisions = w.decisions[len(w.decisions)-MaxDecisions:]
+	}
+	s.dirty[uid] = struct{}{}
+}
+
+// TakeDecisions returns the queued decisions of uid, oldest first, and clears
+// the queue.
+func (s *Store) TakeDecisions(uid types.UID) []v1.Decision {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.data[uid]
+	if d == nil || len(d.decisions) == 0 {
+		return nil
+	}
+	out := d.decisions
+	d.decisions = nil
+	return out
 }

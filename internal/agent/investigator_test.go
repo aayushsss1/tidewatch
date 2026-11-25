@@ -120,7 +120,7 @@ func (r *recNotifier) Applied(_ context.Context, _ *Incident, _ map[types.UID]v1
 	r.applied = append(r.applied, auto)
 }
 func (r *recNotifier) Resolved(context.Context, string, v1.Verdict, string) {}
-func (r *recNotifier) Storm(context.Context, int)                           {}
+func (r *recNotifier) Storm(context.Context, *v1.PolicyRef, int)            {}
 func (r *recNotifier) Skipped(_ context.Context, _ *Incident, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -534,11 +534,11 @@ func TestValidateProposal_Windows(t *testing.T) {
 
 	out, reasons := run(tools.ProposedOverride{Workload: "a", MinReplicas: 3})
 	o := out["u1"]
-	if !o.Start.Time.Equal(now) || !o.End.Time.Equal(now.Add(30*time.Minute)) || len(reasons) != 1 || reasons[0] != "window_clamped" {
+	if !o.Start.Time.Equal(now) || !o.End.Time.Equal(now.Add(30*time.Minute)) || len(reasons) != 1 || reasons[0] != reasonWindowClamp {
 		t.Errorf("defaults: %+v %v", o, reasons)
 	}
 	out, reasons = run(tools.ProposedOverride{Workload: "ns/a", MinReplicas: 3, End: now.Add(5 * time.Hour)})
-	if got := out["u1"].End.Time; !got.Equal(now.Add(2*time.Hour)) || reasons[0] != "window_clamped" {
+	if got := out["u1"].End.Time; !got.Equal(now.Add(2*time.Hour)) || reasons[0] != reasonWindowClamp {
 		t.Errorf("clamp: end=%v %v", got, reasons)
 	}
 	out, reasons = run(tools.ProposedOverride{Workload: "a", MinReplicas: 3, End: now.Add(-time.Minute)})
@@ -583,4 +583,88 @@ func TestBrief_BoundedAndMentionsTriggers(t *testing.T) {
 
 func proposal(conf float64, po ...tools.ProposedOverride) tools.Proposal {
 	return tools.Proposal{Overrides: po, Reason: "r", Confidence: conf}
+}
+
+func TestInvestigator_AutoDecisionReachesStatus(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Auto", "frontend-dec")
+	f.script("get_ops_notes", map[string]any{}, 10)
+	f.propose(0.9, ovIn{Workload: "frontend-dec", MinReplicas: 12})
+
+	res := f.iv.Investigate(f.ctx, f.incident("frontend-dec"), f.deadline())
+	if res.Verdict != v1.VerdictApplied || res.Provider != "scripted" || res.Model != "scripted-1" || res.PromptVersion != PromptVersion {
+		t.Fatalf("result = %+v", res)
+	}
+	f.clk.Step(time.Minute)
+	f.eng.Step(f.ctx)
+
+	var tw v1.TideWorkload
+	if err := f.c.Get(f.ctx, types.NamespacedName{Namespace: testNS, Name: "frontend-dec"}, &tw); err != nil {
+		t.Fatal(err)
+	}
+	var got *v1.Decision
+	for i := range tw.Status.Decisions {
+		if tw.Status.Decisions[i].Source == v1.SourceAgent && tw.Status.Decisions[i].IncidentID == testInc &&
+			tw.Status.Decisions[i].PromptVersion != "" { // the engine's own enforcement decision has none
+			got = &tw.Status.Decisions[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("no agent decision in status: %+v", tw.Status.Decisions)
+	}
+	if got.PromptVersion != PromptVersion || got.Provider != "scripted" || got.Model != "scripted-1" ||
+		got.Verdict != v1.VerdictApplied || got.Desired != 12 || got.Final != 12 {
+		t.Errorf("decision = %+v", got)
+	}
+	if len(got.Trace) != 1 || got.Trace[0].Tool != "get_ops_notes" {
+		t.Errorf("trace = %+v", got.Trace)
+	}
+	if len(tw.Status.Decisions) > 5 {
+		t.Errorf("decisions = %d, want at most 5", len(tw.Status.Decisions))
+	}
+	if again := f.store.TakeDecisions(f.uids["frontend-dec"]); len(again) != 0 {
+		t.Errorf("decisions not drained: %+v", again)
+	}
+}
+
+func TestInvestigator_EmptyVerdictWhenNothingStored(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Auto", "frontend-nostore")
+	// Auto with an invalid stored window: AddOverride fails, so nothing is stored.
+	inc := f.incident("frontend-nostore")
+	uid := f.uids["frontend-nostore"]
+	var pol v1.TidePolicy
+	if err := f.c.Get(f.ctx, types.NamespacedName{Namespace: testNS, Name: f.pol}, &pol); err != nil {
+		t.Fatal(err)
+	}
+	bad := map[types.UID]v1.Override{uid: {IncidentID: testInc}} // zero start: normalize rejects it
+	got := f.iv.route(f.ctx, inc, &pol, tools.Proposal{Confidence: 0.9}, bad, decisionInfo{incident: testInc, now: f.clk.Now()})
+	if got != "" {
+		t.Errorf("auto verdict = %q, want empty", got)
+	}
+	pol.Spec.Agent.Approval = "Manual"
+	if got := f.iv.route(f.ctx, inc, &pol, tools.Proposal{Confidence: 0.9}, bad, decisionInfo{incident: testInc, now: f.clk.Now()}); got != "" {
+		t.Errorf("manual verdict = %q, want empty", got)
+	}
+	if d := f.store.TakeDecisions(uid); len(d) != 0 {
+		t.Errorf("decisions recorded for nothing stored: %+v", d)
+	}
+}
+
+func TestValidateProposal_InvalidWindowAndStartCap(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	inc := &Incident{ID: "i", Members: map[types.UID]*Member{
+		"u1": {Workload: types.NamespacedName{Namespace: "ns", Name: "a"}, UID: "u1"},
+	}}
+	maxFor := func(types.UID) int32 { return 10 }
+	// Start far ahead is capped to now+2h; an end before that cap is then invalid.
+	out, reasons := ValidateProposal(proposal(0.9, tools.ProposedOverride{
+		Workload: "a", MinReplicas: 3, Start: now.Add(10 * time.Hour), End: now.Add(11 * time.Hour)}), inc, maxFor, 0.6, now)
+	if got := out["u1"].Start.Time; !got.Equal(now.Add(2*time.Hour)) || len(reasons) != 1 || reasons[0] != reasonWindowClamp {
+		t.Errorf("start cap: start=%v reasons=%v", got, reasons)
+	}
+	out, reasons = ValidateProposal(proposal(0.9, tools.ProposedOverride{
+		Workload: "a", MinReplicas: 3, Start: now.Add(10 * time.Hour), End: now.Add(time.Hour + time.Minute)}), inc, maxFor, 0.6, now)
+	if len(out) != 0 || reasons[0] != reasonWindowClamp || reasons[len(reasons)-1] != "invalid_window" {
+		t.Errorf("invalid window: %v %v", out, reasons)
+	}
 }

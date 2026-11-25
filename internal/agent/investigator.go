@@ -49,23 +49,25 @@ const (
 	briefDetailMax  = 80
 
 	maxOverrideWindow     = 2 * time.Hour
+	maxStartAhead         = 2 * time.Hour
 	defaultOverrideWindow = 30 * time.Minute
 )
 
 // Skip reasons reported in Result.Skipped.
 const (
-	SkipTooLate       = "too_late"
-	SkipBudget        = "budget_exhausted"
-	SkipProviderDown  = "provider_unavailable"
-	reasonNoState     = "no_state"
-	reasonNoPolicy    = "policy_unavailable"
-	reasonInvalid     = "invalid_final"
-	reasonNoAction    = "no_action"
-	reasonLowConf     = "low_confidence"
-	reasonOutOfScope  = "out_of_scope"
-	reasonClampedMax  = "clamped_max"
-	reasonWindowClamp = "window_clamped"
-	reasonEnded       = "ended"
+	SkipTooLate         = "too_late"
+	SkipBudget          = "budget_exhausted"
+	SkipProviderDown    = "provider_unavailable"
+	reasonNoState       = "no_state"
+	reasonNoPolicy      = "policy_unavailable"
+	reasonInvalid       = "invalid_final"
+	reasonNoAction      = "no_action"
+	reasonLowConf       = "low_confidence"
+	reasonOutOfScope    = "out_of_scope"
+	reasonClampedMax    = "clamped_max"
+	reasonWindowClamp   = "window_clamped"
+	reasonEnded         = "ended"
+	reasonInvalidWindow = "invalid_window"
 )
 
 // Investigator runs one LLM investigation per incident and routes the result.
@@ -94,6 +96,8 @@ type Result struct {
 	Verdict   v1.Verdict
 	Reasons   []string
 	Trace     []v1.TraceEntry
+
+	Provider, Model, PromptVersion string
 }
 
 func (iv *Investigator) notifier() Notifier {
@@ -233,7 +237,8 @@ func (iv *Investigator) investigate(ctx context.Context, inc *Incident, deadline
 	if iv.Budget != nil {
 		iv.Budget.Spend(out.InputTokens + out.OutputTokens)
 	}
-	res := Result{Exit: out.Exit, Trace: toTrace(ltrace)}
+	res := Result{Exit: out.Exit, Trace: toTrace(ltrace), Provider: iv.Provider.Name(),
+		Model: iv.Provider.Model(), PromptVersion: PromptVersion}
 	for _, e := range ltrace {
 		toolCallsTotal.WithLabelValues(e.Tool).Inc()
 	}
@@ -285,7 +290,7 @@ func (iv *Investigator) conclude(
 	valid, reasons := ValidateProposal(*prop, inc, func(uid types.UID) int32 { return snaps[uid].Cfg.MaxReplicas }, minConf, now)
 	res.Reasons = reasons
 	if slices.Contains(reasons, reasonLowConf) {
-		iv.recordRejected(inc, *prop, now)
+		iv.recordRejected(inc, *prop, decisionInfo{incident: inc.ID, reasons: reasons, trace: res.Trace, now: now})
 		res.Verdict = v1.VerdictRejected
 		return res
 	}
@@ -298,7 +303,8 @@ func (iv *Investigator) conclude(
 		valid[uid] = o
 		res.Overrides = append(res.Overrides, o)
 	}
-	res.Verdict = iv.route(ctx, inc, pol, *prop, valid, res.Trace, now)
+	res.Verdict = iv.route(ctx, inc, pol, *prop, valid,
+		decisionInfo{incident: inc.ID, reasons: reasons, trace: res.Trace, now: now})
 	logf.FromContext(ctx).WithName("agent").Info("Investigation routed", "incident", inc.ID, "verdict", res.Verdict,
 		"provider", iv.Provider.Name(), "model", iv.Provider.Model(), "promptVersion", PromptVersion, "overrides", len(valid))
 	return res

@@ -263,3 +263,23 @@ func TestStore_ExpireReturnsEndedAndExpired(t *testing.T) {
 		t.Fatal("forget clears dirty")
 	}
 }
+
+func TestStore_DecisionsQueueBoundedAndDrained(t *testing.T) {
+	s := NewStore()
+	for i := range MaxDecisions + 3 {
+		s.AddDecision("u", v1.Decision{Desired: int32(i), IncidentID: "inc"})
+	}
+	if !s.TakeDirty("u") {
+		t.Error("AddDecision must mark the workload dirty")
+	}
+	got := s.TakeDecisions("u")
+	if len(got) != MaxDecisions || got[0].Desired != 3 || got[len(got)-1].Desired != int32(MaxDecisions+2) {
+		t.Fatalf("decisions = %+v", got)
+	}
+	if again := s.TakeDecisions("u"); len(again) != 0 {
+		t.Errorf("queue not cleared: %+v", again)
+	}
+	if s.TakeDecisions("unknown") != nil {
+		t.Error("unknown uid must yield nil")
+	}
+}
