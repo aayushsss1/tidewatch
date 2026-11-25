@@ -22,6 +22,7 @@ import (
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 	"github.com/aayushsss1/tidewatch/internal/overrides"
+	"github.com/aayushsss1/tidewatch/internal/signal"
 	"github.com/aayushsss1/tidewatch/internal/workload"
 	"github.com/aayushsss1/tidewatch/pkg/forecast"
 	"github.com/aayushsss1/tidewatch/pkg/prom"
@@ -46,6 +47,7 @@ type Options struct {
 	PromFactory        func(url string, timeout time.Duration) (prom.Querier, error)
 	Scale              workload.ScaleClient // default workload.NewScaleClient(c)
 	Overrides          *overrides.Store     // nil disables overrides: the engine behaves as in M1
+	Triggers           TriggerSink          // nil disables trigger detection entirely
 }
 
 type promEntry struct {
@@ -60,6 +62,8 @@ type Engine struct {
 	opts  Options
 	clock clock.Clock
 	ov    *overrides.Store
+
+	debounce *signal.Debouncer
 
 	mu     sync.Mutex
 	states map[types.UID]*wlState
@@ -90,6 +94,7 @@ func New(c client.Client, opts Options) *Engine {
 	return &Engine{
 		c: c, scale: opts.Scale, opts: opts, clock: opts.Clock, ov: opts.Overrides,
 		states: map[types.UID]*wlState{}, proms: map[string]*promEntry{},
+		debounce: signal.NewDebouncer(),
 	}
 }
 
@@ -178,6 +183,7 @@ func (e *Engine) prune(list *v1.TideWorkloadList) {
 			continue
 		}
 		delete(e.states, uid)
+		e.debounce.Forget(uid)
 		for _, p := range e.proms {
 			p.col.Forget(string(uid))
 		}
@@ -340,6 +346,7 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		e.unavailable(it, reasonNoData, "load series has no data")
 		return it
 	}
+	e.detectTriggers(ctx, it, gaps.Healthy())
 	e.applyOverride(it)
 	e.sampleOverrides(it)
 	it.enforce = true

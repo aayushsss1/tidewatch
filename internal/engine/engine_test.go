@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 	"github.com/aayushsss1/tidewatch/internal/overrides"
+	"github.com/aayushsss1/tidewatch/internal/signal"
 	"github.com/aayushsss1/tidewatch/internal/workload"
 	"github.com/aayushsss1/tidewatch/pkg/forecast"
 	"github.com/aayushsss1/tidewatch/pkg/prom"
@@ -106,6 +108,28 @@ func gaugeFor(name, wl string) float64 {
 		}
 	}
 	return -1
+}
+
+// sink captures submitted triggers.
+type sink struct {
+	mu  sync.Mutex
+	got []signal.Trigger
+}
+
+func (s *sink) Submit(t signal.Trigger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, t)
+}
+
+func (s *sink) types() []signal.Type {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]signal.Type, 0, len(s.got))
+	for _, t := range s.got {
+		out = append(out, t.Type)
+	}
+	return out
 }
 
 var _ = Describe("Engine", func() {
@@ -223,6 +247,38 @@ var _ = Describe("Engine", func() {
 		Expect(meta.IsStatusConditionTrue(st.Conditions, v1.CondForecasting)).To(BeTrue())
 		Expect(st.ForecastPeak).NotTo(BeEmpty())
 		Expect(st.Forecasts).NotTo(BeEmpty())
+	})
+
+	Context("trigger detection", func() {
+		It("submits ForecastBreach when the forecast outgrows capacity, and is inert with a nil sink", func() {
+			// 6 replicas: capacity 48; the ramp breaches it beyond what the baseline already covers.
+			newPolicy(v1.ModeShadow, nil)
+			newWorkload("breach", 6)
+			s := &sink{}
+			withSink := New(k8sClient, Options{
+				Clock: clk, DefaultTimeToReady: 5 * time.Minute, Triggers: s,
+				PromFactory: func(string, time.Duration) (prom.Querier, error) { return q, nil },
+			})
+			withSink.Step(ctx)
+			Expect(s.types()).To(ContainElement(signal.ForecastBreach))
+			s.mu.Lock()
+			tr := s.got[0]
+			s.mu.Unlock()
+			Expect(tr.Workload).To(Equal(types.NamespacedName{Namespace: testNS, Name: "breach"}))
+			Expect(tr.Policy).To(Equal(v1.PolicyRef{Namespace: testNS, Name: pol}))
+			Expect(tr.TimeToBreach).NotTo(BeNil())
+
+			// A second tick inside the debounce window raises nothing new of that type.
+			n := len(s.types())
+			clk.Step(testStep)
+			withSink.Step(ctx)
+			Expect(s.types()).To(HaveLen(n))
+
+			// Nil Triggers: the same scenario still produces a decision and nothing else.
+			Expect(eng.opts.Triggers).To(BeNil())
+			eng.Step(ctx)
+			Expect(statusOf("breach").Decisions).NotTo(BeEmpty())
+		})
 	})
 
 	It("never scales a TideWorkload the controller has not initialized with a Conflict condition", func() {

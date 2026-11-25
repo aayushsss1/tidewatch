@@ -76,6 +76,7 @@ func (e *Engine) decide(ctx context.Context, it *item, others int32) {
 	cutoff := it.now.Add(-rails.ScaleDown.StabilizationWindow.Duration)
 	st.recs = slices.DeleteFunc(st.recs, func(r TimedReplicas) bool { return r.T.Before(cutoff) })
 
+	st.externalChange = res.ExternalChange
 	if res.ExternalChange {
 		st.lastUp, st.lastDown = it.now, it.now
 		st.lastApplied = new(it.scale.Replicas)

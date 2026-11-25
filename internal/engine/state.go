@@ -43,6 +43,15 @@ type wlState struct {
 	lastAligned time.Time // step-aligned time of the last Record/Observe
 	replicas    int32     // last known replica count, for policy budgets
 
+	// Trigger detection inputs (only maintained when Options.Triggers is set).
+	prevForecasts  []forecast.Forecast // last tick's forecasts, to judge the current step
+	outsideSteps   int
+	outsideAt      time.Time
+	tplSig         uint64
+	tplSeen        bool
+	externalChange bool // the enforcer saw another actor change replicas last tick
+	restarts       []restartSample
+
 	tracks map[string]*track // overrides being sampled for outcome scoring, by override key
 	events []v1.Decision     // approval, rejection and expiry decisions awaiting a status write
 
