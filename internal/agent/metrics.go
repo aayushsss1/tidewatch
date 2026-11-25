@@ -42,13 +42,17 @@ var (
 		Name: "tidewatch_agent_storm", Help: "1 after a trigger storm was detected; the runner clears it when storm mode ends.",
 	})
 
+	triggersDropped = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "tidewatch_agent_triggers_dropped_total", Help: "Triggers dropped because the runner's buffer was full.",
+	})
+
 	metricsOnce sync.Once
 )
 
 func registerAgentMetrics() {
 	metricsOnce.Do(func() {
 		ctrlmetrics.Registry.MustRegister(investigationsTotal, toolCallsTotal, tokensTotal, latencySeconds,
-			queueDepth, budgetRemaining, circuitOpen, overridesActive, stormGauge)
+			queueDepth, budgetRemaining, circuitOpen, overridesActive, stormGauge, triggersDropped)
 	})
 }
 

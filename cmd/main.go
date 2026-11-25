@@ -17,20 +17,24 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
+	"sync/atomic"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -38,9 +42,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	tidewatchv1alpha1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
+	"github.com/aayushsss1/tidewatch/internal/agent"
 	"github.com/aayushsss1/tidewatch/internal/controller"
 	"github.com/aayushsss1/tidewatch/internal/engine"
+	"github.com/aayushsss1/tidewatch/internal/overrides"
+	"github.com/aayushsss1/tidewatch/internal/signal"
 	"github.com/aayushsss1/tidewatch/internal/workload"
+	"github.com/aayushsss1/tidewatch/pkg/llm"
+	"github.com/aayushsss1/tidewatch/pkg/llm/anthropic"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -54,6 +63,56 @@ func init() {
 
 	utilruntime.Must(tidewatchv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+const (
+	providerNone      = "none"
+	providerAnthropic = "anthropic"
+	apiKeyEnv         = "TIDEWATCH_LLM_API_KEY" //nolint:gosec // env var name, not a credential
+	webhookSecretKey  = "webhookUrl"
+)
+
+// lateSink forwards triggers to the agent runner, which is built after the
+// engine it needs. Nothing is submitted before the manager starts.
+type lateSink struct{ r atomic.Pointer[agent.Runner] }
+
+func (s *lateSink) Submit(t signal.Trigger) {
+	if r := s.r.Load(); r != nil {
+		r.Submit(t)
+	}
+}
+
+// newProvider returns the LLM provider, or nil (agent disabled) when none is
+// configured or its API key is missing.
+func newProvider(name, model string) llm.Provider {
+	switch name {
+	case providerNone:
+		return nil
+	case providerAnthropic:
+		key := os.Getenv(apiKeyEnv)
+		if key == "" {
+			setupLog.Error(nil, "LLM provider requires an API key; agent disabled", "provider", name, "env", apiKeyEnv)
+			return nil
+		}
+		return anthropic.New(key, model)
+	}
+	setupLog.Error(nil, "Unknown --llm-provider; agent disabled", "provider", name)
+	return nil
+}
+
+// webhookURL reads the Slack webhook once from the named Secret in the
+// operator namespace. Failure disables Slack only.
+func webhookURL(r client.Reader, secret string) string {
+	ns := os.Getenv("POD_NAMESPACE")
+	if secret == "" || ns == "" {
+		return ""
+	}
+	var sec corev1.Secret
+	if err := r.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: secret}, &sec); err != nil {
+		setupLog.Error(err, "Reading Slack webhook secret; Slack disabled", "secret", secret)
+		return ""
+	}
+	return string(sec.Data[webhookSecretKey])
 }
 
 // nolint:gocyclo
@@ -70,6 +129,8 @@ func main() {
 	var workers int
 	var dryRun bool
 	var defaultTimeToReady time.Duration
+	var llmProvider, llmModel, slackWebhookSecret string
+	var agentWorkers, tokenBudgetPerHour int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -93,6 +154,14 @@ func main() {
 	flag.BoolVar(&dryRun, "dry-run", false, "If set, the engine never writes to the scale subresource.")
 	flag.DurationVar(&defaultTimeToReady, "default-time-to-ready", 60*time.Second,
 		"Time-to-ready assumed for a workload until enough pod startups have been observed.")
+	flag.StringVar(&llmProvider, "llm-provider", providerNone,
+		"LLM provider of the investigation agent: none or anthropic. "+
+			"The API key is read from the "+apiKeyEnv+" environment variable.")
+	flag.StringVar(&llmModel, "llm-model", "claude-sonnet-5-5", "Model the investigation agent uses.")
+	flag.IntVar(&agentWorkers, "agent-workers", 4, "Number of parallel agent investigations.")
+	flag.IntVar(&tokenBudgetPerHour, "agent-token-budget-per-hour", 200000, "LLM tokens the agent may spend per hour.")
+	flag.StringVar(&slackWebhookSecret, "slack-webhook-secret", "",
+		"Name of the Secret in the operator namespace whose '"+webhookSecretKey+"' key holds a Slack webhook URL.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -206,12 +275,30 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "tidepolicy")
 		os.Exit(1)
 	}
-	if err := mgr.Add(engine.New(mgr.GetClient(), engine.Options{
+	store := overrides.NewStore()
+	sink := &lateSink{}
+	eng := engine.New(mgr.GetClient(), engine.Options{
 		Workers:            workers,
 		DryRun:             dryRun,
 		DefaultTimeToReady: defaultTimeToReady,
-	})); err != nil {
+		Overrides:          store,
+		APIReader:          mgr.GetAPIReader(),
+		Triggers:           sink,
+	})
+	if err := mgr.Add(eng); err != nil {
 		setupLog.Error(err, "Failed to add engine")
+		os.Exit(1)
+	}
+	// The Notifier uses the classic record.EventRecorder API.
+	recorder := mgr.GetEventRecorderFor("tidewatch") //nolint:staticcheck // see above
+	runner := agent.NewRunner(mgr.GetClient(), mgr.GetAPIReader(), eng, store, recorder,
+		agent.RunnerOptions{
+			Workers: agentWorkers, TokenBudgetPerHour: tokenBudgetPerHour,
+			Provider: newProvider(llmProvider, llmModel), WebhookURL: webhookURL(mgr.GetAPIReader(), slackWebhookSecret),
+		})
+	sink.r.Store(runner)
+	if err := mgr.Add(runner); err != nil {
+		setupLog.Error(err, "Failed to add agent runner")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
