@@ -135,3 +135,22 @@ func TestHoltWinters_RefitsOnlyEveryN(t *testing.T) {
 		t.Errorf("fits after 4 calls = %d, want 2", got)
 	}
 }
+
+func TestHoltWinters_IntervalCoverageWithMinimalHistory(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 9))
+	noisy := func(i int) float64 { return sineAt(i) + rng.NormFloat64()*5 }
+	s := hwSeries(48, noisy) // exactly 2m points
+	f, err := NewHoltWinters(HoltWintersOptions{}).Forecast(context.Background(), s, hwSeason, hwSeason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside := 0
+	for h, p := range f.Points {
+		if truth := noisy(48 + h); truth >= p.Lower && truth <= p.Upper {
+			inside++
+		}
+	}
+	if frac := float64(inside) / 24; frac < 0.7 {
+		t.Errorf("coverage = %.2f, want >= 0.70", frac)
+	}
+}

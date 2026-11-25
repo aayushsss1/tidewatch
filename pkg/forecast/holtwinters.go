@@ -111,12 +111,12 @@ func (hw *holtWinters) Forecast(ctx context.Context, s Series, horizon, season t
 type hwState struct {
 	level, trend float64
 	seasonal     []float64
-	errs         []float64 // in-sample one-step errors
+	errs         []float64 // in-sample one-step errors for t >= m
 	sse          float64
 }
 
 // runHW initializes from the first two seasons and runs the additive recursion
-// over all of y, collecting one-step errors.
+// over all of y, collecting one-step errors for t >= m.
 func runHW(y []float64, m int, p hwParams) hwState {
 	var m1, m2 float64
 	for i := range m {
@@ -132,9 +132,11 @@ func runHW(y []float64, m int, p hwParams) hwState {
 	for t, v := range y {
 		si := t % m
 		pred := st.level + st.trend + st.seasonal[si]
-		e := v - pred
-		st.errs = append(st.errs, e)
-		st.sse += e * e
+		if t >= m { // the first season seeds the seasonal terms, so its errors are artifacts
+			e := v - pred
+			st.errs = append(st.errs, e)
+			st.sse += e * e
+		}
 		prev := st.level
 		st.level = p.alpha*(v-st.seasonal[si]) + (1-p.alpha)*(st.level+st.trend)
 		st.trend = p.beta*(st.level-prev) + (1-p.beta)*st.trend
