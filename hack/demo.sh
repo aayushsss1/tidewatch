@@ -167,13 +167,15 @@ PY
 )"
   k -n "$POLICY_NS" patch tidepolicy "$POLICY_NAME" --type=merge -p "$PATCH_BODY"
   # Seed one hand-written episode so retrieval has something to find.
-  read -r EP_START EP_PEAK EP_END WEEKDAY HOUR < <(python3 - "$SPIKE_AT" <<'PY'
+  EP_TIMES="$(python3 - "$SPIKE_AT" <<'PY'
 import sys, datetime as d
 t = d.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ") - d.timedelta(days=7)
 f = "%Y-%m-%dT%H:%M:%SZ"
 print(t.strftime(f), (t + d.timedelta(minutes=5)).strftime(f), (t + d.timedelta(minutes=12)).strftime(f), t.strftime("%a"), t.hour)
 PY
-)
+)" || { echo "failed to compute the seeded episode times" >&2; exit 1; }
+  read -r EP_START EP_PEAK EP_END WEEKDAY HOUR <<<"$EP_TIMES"
+  [ -n "$HOUR" ] || { echo "bad episode times: '$EP_TIMES'" >&2; exit 1; }
   sed -e "s|\${POLICY_NS}|$POLICY_NS|g" -e "s|\${POLICY_NAME}|$POLICY_NAME|g" \
       -e "s|\${EP_START}|$EP_START|g" -e "s|\${EP_PEAK}|$EP_PEAK|g" -e "s|\${EP_END}|$EP_END|g" \
       -e "s|\${WEEKDAY}|$WEEKDAY|g" -e "s|\${HOUR}|$HOUR|g" demo/manifests/episode-template.yaml | k apply -f -

@@ -56,7 +56,7 @@ spec:
 and give the operator a provider and key:
 
 ```sh
-kubectl -n tidewatch-system create secret generic tidewatch-llm --from-literal=apiKey=...
+printf '%s' "$KEY" | kubectl create secret generic tidewatch-llm -n tidewatch-system --from-file=apiKey=/dev/stdin
 # then add --llm-provider=anthropic (and optionally --llm-model) to the manager args
 ```
 
@@ -105,7 +105,7 @@ export ANTHROPIC_API_KEY=...          # this makes paid LLM calls
 make demo-down demo-e2e-act2          # about 30 minutes; asserts the agent's override, an episode and the ghost metric
 ```
 
-or `ANTHROPIC_API_KEY=... make demo` to run it without the assertions. `make demo` creates Secret `tidewatch-llm`, deploys with `--llm-provider=anthropic`, sets `agent.enabled: true` with `approval: Auto`, adds the ops note and seeds one hand-written `TideEpisode`. Without the key it prints `Act 2 skipped: set ANTHROPIC_API_KEY to run the agent` and Act 1 runs unchanged, with the same traffic shape. `make demo-e2e` runs Act 1 only (no key needed, and CI uses it).
+or `ANTHROPIC_API_KEY=... make demo` to run it without the assertions. `make demo` creates Secret `tidewatch-llm`, deploys with `--llm-provider=anthropic`, sets `agent.enabled: true` with `approval: Auto`, adds the ops note and seeds one hand-written `TideEpisode`. Without the key it prints `Act 2 skipped: set ANTHROPIC_API_KEY to run the agent` and Act 1 runs unchanged, with the same traffic shape. `make demo-e2e` runs Act 1 only: it strips `ANTHROPIC_API_KEY` from the environment, so an exported key never causes paid calls (CI uses it).
 
 **Cost:** measured at the first live run; expected to be cents per demo. <!-- TODO: fill in the measured token count (tidewatch_agent_tokens_total) and cost after the first live Act 2 run. -->
 

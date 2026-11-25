@@ -85,12 +85,13 @@ demo-down: ## Delete the demo kind cluster.
 
 .PHONY: demo-e2e
 demo-e2e: manifests generate fmt vet ## Run hack/demo.sh and assert the prescale before the peak, Act 1 only (needs docker, kind, helm).
-	go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter='!act2' -timeout 30m
+	# env -u: an exported key must never turn the Act 1 run into a paid agent run.
+	env -u ANTHROPIC_API_KEY go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter='!act2' -timeout 30m
 
 .PHONY: demo-e2e-act2
 demo-e2e-act2: manifests generate fmt vet ## Run Act 1 and Act 2 (the agent prescales a flash sale). Needs ANTHROPIC_API_KEY and makes paid LLM calls.
 	@test -n "$$ANTHROPIC_API_KEY" || { echo "ANTHROPIC_API_KEY is required for demo-e2e-act2" >&2; exit 1; }
-	go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 45m
+	TIDEWATCH_E2E_ACT2=1 go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 45m
 
 .PHONY: test-e2e
 test-e2e: demo-e2e ## Alias for demo-e2e.
