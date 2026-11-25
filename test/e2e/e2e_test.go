@@ -22,6 +22,7 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -73,9 +74,9 @@ func readState(root string) map[string]string {
 	return out
 }
 
-// promQuery runs an instant query inside the Prometheus pod and returns the result vector length.
-func promQuery(q string) (int, error) {
-	u := "http://localhost:9090/api/v1/query?query=" + url.QueryEscape(q)
+// promQuery runs an instant query at time `at` inside the Prometheus pod and returns the result vector length.
+func promQuery(q string, at time.Time) (int, error) {
+	u := "http://localhost:9090/api/v1/query?query=" + url.QueryEscape(q) + "&time=" + strconv.FormatInt(at.Unix(), 10)
 	out, err := kubectl("-n", "monitoring", "exec", promPod, "-c", "prometheus", "--", "wget", "-qO-", u)
 	if err != nil {
 		return 0, err
@@ -97,8 +98,9 @@ func promQuery(q string) (int, error) {
 
 var _ = Describe("demo act 1", Ordered, func() {
 	var (
-		root string
-		peak time.Time
+		root  string
+		peak  time.Time
+		epoch time.Time
 	)
 
 	BeforeAll(func() {
@@ -113,7 +115,10 @@ var _ = Describe("demo act 1", Ordered, func() {
 		cmd.Stderr = GinkgoWriter
 		Expect(cmd.Run()).To(Succeed(), "hack/demo.sh failed")
 
-		peak, err = time.Parse(time.RFC3339, readState(root)["PEAK"])
+		state := readState(root)
+		peak, err = time.Parse(time.RFC3339, state["PEAK"])
+		Expect(err).NotTo(HaveOccurred())
+		epoch, err = time.Parse(time.RFC3339, state["EPOCH"])
 		Expect(err).NotTo(HaveOccurred())
 	})
 
@@ -136,22 +141,24 @@ var _ = Describe("demo act 1", Ordered, func() {
 			found := false
 			for _, d := range tw.Status.Decisions {
 				if d.Source == "baseline" && (d.Verdict == "applied" || d.Verdict == "clamped") &&
-					d.Final > 1 && d.Time.Before(peak) {
+					d.Final >= 3 && d.Time.Before(peak) {
 					found = true
 				}
 			}
 			g.Expect(found).To(BeTrue(), "no baseline applied/clamped scale-up before %s in %s", peak, out)
-		}, 7*time.Minute, 10*time.Second).Should(Succeed())
+		}, 14*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("waiting for the peak to pass")
 		time.Sleep(time.Until(peak.Add(30 * time.Second)))
 
 		By("asserting load never exceeded ready capacity over the ramp")
-		q := `max_over_time(tidewatch_capacity_ratio{workload="` + workloadName + `"}[6m]) < 1.0`
+		// Window from 2m after epoch (once the operator has settled in the trough) to the peak, whole minutes.
+		w := int(math.Round(peak.Sub(epoch.Add(2 * time.Minute)).Minutes()))
+		q := fmt.Sprintf(`max_over_time(tidewatch_capacity_ratio{workload="%s"}[%dm]) < 1.0`, workloadName, w)
 		Eventually(func(g Gomega) {
-			n, err := promQuery(q)
+			n, err := promQuery(q, peak)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(n).To(BeNumerically(">", 0), "capacity ratio reached >= 1.0 (or no series): "+strconv.Quote(q))
+			g.Expect(n).To(BeNumerically(">", 0), "capacity ratio reached >= 1.0 (or no series): "+q)
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })

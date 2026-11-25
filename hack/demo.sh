@@ -56,6 +56,9 @@ docker build --target trafficgen -t "$TG_IMG" demo
 for img in "$OP_IMG" "$APP_IMG" "$TG_IMG"; do
   kind load docker-image --name "$CLUSTER" "$img"
 done
+# Pre-build the seeder so no compile time lands between computing EPOCH and applying the policy.
+mkdir -p "$STATE_DIR"
+(cd demo && go build -o "$STATE_DIR/trafficgen" ./trafficgen)
 
 step "4/9 install CRDs and deploy the operator"
 make install deploy IMG="$OP_IMG"
@@ -76,12 +79,13 @@ for d in frontend api worker; do
 done
 
 step "6/9 seed 1h of history through Prometheus remote-write"
-# Peak (epoch + period/2) lands ~4 minutes from now. Override with EPOCH=<RFC3339 UTC> to pin.
+# Everything slow is done by now. Phase 0 of the pattern (the trough, ~40 rps) starts at EPOCH = now + 1m,
+# roughly when the policy is applied, so the peak (EPOCH + period/2) is ~10 minutes out.
+# Override with EPOCH=<RFC3339 UTC> to pin.
 if [ -z "${EPOCH:-}" ]; then
-  EPOCH="$(python3 - "$PERIOD_SECONDS" <<'PY'
-import sys, datetime as d
-period = int(sys.argv[1])
-t = d.datetime.now(d.timezone.utc) + d.timedelta(minutes=4) - d.timedelta(seconds=period // 2)
+  EPOCH="$(python3 - <<'PY'
+import datetime as d
+t = d.datetime.now(d.timezone.utc) + d.timedelta(minutes=1)
 print(t.strftime("%Y-%m-%dT%H:%M:%SZ"))
 PY
 )"
@@ -103,15 +107,12 @@ for i in $(seq 1 60); do
   if [ "$i" = 60 ]; then echo "Prometheus port-forward never became ready" >&2; exit 1; fi
   sleep 1
 done
-(
-  cd demo
-  go run ./trafficgen seed \
-    --remote-write "$PROM_LOCAL/api/v1/write" --from 1h --step 15s \
-    --base "$BASE" --amp "$AMP" --period "$PERIOD" --noise "$NOISE" --seed 1 --epoch "$EPOCH" \
-    --series namespace=shop,app=frontend \
-    --series namespace=shop,app=api \
-    --series namespace=shop,app=worker
-)
+"$STATE_DIR/trafficgen" seed \
+  --remote-write "$PROM_LOCAL/api/v1/write" --from 1h --step 15s \
+  --base "$BASE" --amp "$AMP" --period "$PERIOD" --noise "$NOISE" --seed 1 --epoch "$EPOCH" \
+  --series namespace=shop,app=frontend \
+  --series namespace=shop,app=api \
+  --series namespace=shop,app=worker
 cleanup; PF_PID=""
 
 step "7/9 start trafficgen run (same pattern and epoch)"
@@ -124,7 +125,7 @@ k apply -f config/samples/demo-policy.yaml
 step "9/9 up"
 cat <<MSG
 
-Peak load is expected at ${PEAK} (about 4 minutes after seeding finished).
+Peak load is expected at ${PEAK} (about 10 minutes after the demo came up; it starts in the trough).
 Watch Tidewatch prescale the frontend ahead of it:
 
   kubectl --context ${CTX} get tideworkloads -n shop -w

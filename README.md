@@ -12,7 +12,7 @@ Prerequisites: Docker, [kind](https://kind.sigs.k8s.io), [Helm](https://helm.sh)
 make demo
 ```
 
-This creates a kind cluster named `tidewatch`, installs a slim kube-prometheus-stack, builds and loads the operator, demo app and traffic generator images, deploys the `frontend -> api -> worker` shop, seeds one hour of request history, starts the traffic generator and applies a `TidePolicy`. The traffic follows a 20 minute cycle (40 to 300 rps) whose peak lands about 4 minutes after the demo comes up.
+This creates a kind cluster named `tidewatch`, installs a slim kube-prometheus-stack, builds and loads the operator, demo app and traffic generator images, deploys the `frontend -> api -> worker` shop, seeds one hour of request history, starts the traffic generator and applies a `TidePolicy`. The traffic follows a 20 minute cycle (40 to 300 rps) which starts in the trough, so the peak arrives about 10 minutes after `make demo` finishes.
 
 Watch Tidewatch scale the frontend up before the peak, not after it:
 
@@ -25,7 +25,7 @@ kubectl get deploy -n shop -w
 
 For the demo the operator serves `/metrics` over plain HTTP (`--metrics-secure=false`) so a stock ServiceMonitor can scrape it. Do not do that in production.
 
-Clean up with `make demo-down`. `make demo-e2e` runs the same demo and asserts the prescale (it takes about 10 minutes).
+Clean up with `make demo-down`. `make demo-e2e` runs the same demo and asserts the prescale (it takes about 15 to 20 minutes).
 
 ## License
 
