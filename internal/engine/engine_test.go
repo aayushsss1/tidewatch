@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -20,6 +21,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
+	"github.com/aayushsss1/tidewatch/internal/workload"
 	"github.com/aayushsss1/tidewatch/pkg/forecast"
 	"github.com/aayushsss1/tidewatch/pkg/prom"
 )
@@ -29,6 +31,19 @@ const (
 	testStep = time.Minute
 	season   = time.Hour
 )
+
+// spyScale reports a valid state and counts calls.
+type spyScale struct{ gets, sets atomic.Int32 }
+
+func (s *spyScale) Get(context.Context, workload.Target) (workload.ScaleState, error) {
+	s.gets.Add(1)
+	return workload.ScaleState{Replicas: 2, Ready: 2}, nil
+}
+
+func (s *spyScale) Set(context.Context, workload.Target, int32) error {
+	s.sets.Add(1)
+	return nil
+}
 
 // loadQuerier serves load(t) sampled on the requested grid.
 type loadQuerier struct {
@@ -86,7 +101,7 @@ var _ = Describe("Engine", func() {
 		Expect(k8sClient.Create(ctx, p)).To(Succeed())
 	}
 
-	newWorkload := func(name string, replicas int32) {
+	newWorkloadInit := func(name string, replicas int32, initialized bool) {
 		labels := map[string]string{"app": name}
 		d := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name},
@@ -109,7 +124,13 @@ var _ = Describe("Engine", func() {
 		}
 		Expect(k8sClient.Create(ctx, tw)).To(Succeed())
 		names = append(names, name)
+		if initialized { // what the policy controller does on creation
+			meta.SetStatusCondition(&tw.Status.Conditions, metav1.Condition{
+				Type: v1.CondConflict, Status: metav1.ConditionFalse, Reason: "none"})
+			Expect(k8sClient.Status().Update(ctx, tw)).To(Succeed())
+		}
 	}
+	newWorkload := func(name string, replicas int32) { newWorkloadInit(name, replicas, true) }
 
 	replicasOf := func(name string) int32 {
 		d := &appsv1.Deployment{}
@@ -159,6 +180,21 @@ var _ = Describe("Engine", func() {
 		Expect(meta.IsStatusConditionTrue(st.Conditions, v1.CondForecasting)).To(BeTrue())
 		Expect(st.ForecastPeak).NotTo(BeEmpty())
 		Expect(st.Forecasts).NotTo(BeEmpty())
+	})
+
+	It("never scales a TideWorkload the controller has not initialized with a Conflict condition", func() {
+		newPolicy(v1.ModeActive, nil)
+		newWorkloadInit("uninit", 2, false)
+		spy := &spyScale{}
+		e := New(k8sClient, Options{
+			Clock: clk, Scale: spy, DefaultTimeToReady: 5 * time.Minute,
+			PromFactory: func(string, time.Duration) (prom.Querier, error) { return q, nil },
+		})
+		e.Step(ctx)
+		Expect(spy.gets.Load()).To(BeZero())
+		Expect(spy.sets.Load()).To(BeZero())
+		Expect(replicasOf("uninit")).To(Equal(int32(2)))
+		Expect(statusOf("uninit").Decisions).To(BeEmpty())
 	})
 
 	It("records shadow decisions without patching in Shadow mode", func() {

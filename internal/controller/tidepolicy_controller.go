@@ -48,6 +48,8 @@ const (
 	// changes to workload kinds other than Deployments and StatefulSets, which
 	// are not watched.
 	resyncInterval = 30 * time.Second
+	// pendingRequeue is used when a freshly created TideWorkload is not yet readable.
+	pendingRequeue = 3 * time.Second
 )
 
 // TidePolicyReconciler creates and deletes the TideWorkloads a TidePolicy selects.
@@ -85,9 +87,15 @@ func (r *TidePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		for i := range existing {
-			if err := r.Delete(ctx, &existing[i]); client.IgnoreNotFound(err) != nil {
+		if len(existing) > 0 {
+			res, err := r.resolve(ctx)
+			if err != nil {
 				return ctrl.Result{}, err
+			}
+			for i := range existing {
+				if err := r.releaseOrDelete(ctx, &existing[i], ref, res); err != nil {
+					return ctrl.Result{}, err
+				}
 			}
 		}
 		controllerutil.RemoveFinalizer(&policy, finalizer)
@@ -99,17 +107,7 @@ func (r *TidePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	var all v1.TidePolicyList
-	if err := r.List(ctx, &all); err != nil {
-		return ctrl.Result{}, err
-	}
-	live := all.Items[:0]
-	for _, p := range all.Items {
-		if p.DeletionTimestamp.IsZero() {
-			live = append(live, p)
-		}
-	}
-	res, err := (&workload.Resolver{Client: r.Client, ScaleSupport: r.ScaleSupport}).ResolveAll(ctx, live)
+	res, err := r.resolve(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -117,15 +115,18 @@ func (r *TidePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	targets := res.Targets[ref]
 	wanted := map[types.NamespacedName]struct{}{}
 	var conflicts []string
+	requeue := false
 	for _, t := range targets {
 		key := types.NamespacedName{Namespace: t.Namespace, Name: workload.TideWorkloadName(t.Ref)}
 		wanted[key] = struct{}{}
 		if t.Conflict != "" {
 			conflicts = append(conflicts, fmt.Sprintf("%s/%s: %s", t.Namespace, t.Ref.Name, t.Conflict))
 		}
-		if err := r.ensureTideWorkload(ctx, &policy, t, res); err != nil {
+		pending, err := r.ensureTideWorkload(ctx, &policy, t, res)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
+		requeue = requeue || pending
 	}
 	existing, err := r.labeled(ctx, ref)
 	if err != nil {
@@ -135,16 +136,56 @@ func (r *TidePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if _, ok := wanted[client.ObjectKeyFromObject(&existing[i])]; ok {
 			continue
 		}
-		log.Info("Deleting TideWorkload no longer selected", "tideworkload", client.ObjectKeyFromObject(&existing[i]))
-		if err := r.Delete(ctx, &existing[i]); client.IgnoreNotFound(err) != nil {
+		log.Info("Releasing TideWorkload no longer selected", "tideworkload", client.ObjectKeyFromObject(&existing[i]))
+		if err := r.releaseOrDelete(ctx, &existing[i], ref, res); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
+	// selectedWorkloads counts conflicted targets too: they are selected, just in conflict.
 	if err := r.updatePolicyStatus(ctx, &policy, int32(len(targets)), conflicts, res.Issues[ref]); err != nil {
 		return ctrl.Result{}, err
 	}
+	if requeue {
+		return ctrl.Result{RequeueAfter: pendingRequeue}, nil
+	}
 	return ctrl.Result{RequeueAfter: resyncInterval}, nil
+}
+
+// resolve runs ResolveAll over every policy that is not being deleted.
+func (r *TidePolicyReconciler) resolve(ctx context.Context) (workload.Resolution, error) {
+	var all v1.TidePolicyList
+	if err := r.List(ctx, &all); err != nil {
+		return workload.Resolution{}, err
+	}
+	live := all.Items[:0]
+	for _, p := range all.Items {
+		if p.DeletionTimestamp.IsZero() {
+			live = append(live, p)
+		}
+	}
+	return (&workload.Resolver{Client: r.Client, ScaleSupport: r.ScaleSupport}).ResolveAll(ctx, live)
+}
+
+// releaseOrDelete removes a TideWorkload that policy ref no longer selects. If
+// another live policy still selects the same target, the TideWorkload is handed
+// over to it (relabeled) instead, so it never disappears under that policy.
+func (r *TidePolicyReconciler) releaseOrDelete(
+	ctx context.Context, tw *v1.TideWorkload, ref v1.PolicyRef, res workload.Resolution,
+) error {
+	for other, ts := range res.Targets {
+		if other == ref {
+			continue
+		}
+		if slices.ContainsFunc(ts, func(t workload.Target) bool {
+			return t.Namespace == tw.Namespace && workload.TideWorkloadName(t.Ref) == tw.Name
+		}) {
+			tw.Labels[v1.LabelPolicy] = policyLabel(other)
+			tw.Spec.PolicyRef = other
+			return client.IgnoreNotFound(r.Update(ctx, tw))
+		}
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, tw))
 }
 
 func policyLabel(ref v1.PolicyRef) string { return ref.Namespace + "." + ref.Name }
@@ -161,7 +202,7 @@ func (r *TidePolicyReconciler) labeled(ctx context.Context, ref v1.PolicyRef) ([
 // writes its Conflict and Paused conditions.
 func (r *TidePolicyReconciler) ensureTideWorkload(
 	ctx context.Context, policy *v1.TidePolicy, t workload.Target, res workload.Resolution,
-) error {
+) (pending bool, err error) {
 	ref := v1.PolicyRef{Namespace: policy.Namespace, Name: policy.Name}
 	key := types.NamespacedName{Namespace: t.Namespace, Name: workload.TideWorkloadName(t.Ref)}
 	labels := map[string]string{v1.LabelPolicy: policyLabel(ref)}
@@ -170,40 +211,6 @@ func (r *TidePolicyReconciler) ensureTideWorkload(
 		Controller: new(false), BlockOwnerDeletion: new(false),
 	}}
 	spec := v1.TideWorkloadSpec{PolicyRef: ref, TargetRef: t.Ref}
-
-	tw := &v1.TideWorkload{}
-	err := r.Get(ctx, key, tw)
-	switch {
-	case apierrors.IsNotFound(err):
-		tw = &v1.TideWorkload{
-			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: labels, OwnerReferences: owners},
-			Spec:       spec,
-		}
-		if err := r.Create(ctx, tw); err != nil {
-			return err
-		}
-	case err != nil:
-		return err
-	default:
-		if other := tw.Spec.PolicyRef; other != ref && slices.ContainsFunc(res.Targets[other], func(o workload.Target) bool {
-			return o.Namespace == t.Namespace && workload.TideWorkloadName(o.Ref) == key.Name
-		}) {
-			// Another live policy still selects this workload and owns the
-			// TideWorkload; leave it be rather than fight over it.
-			return nil
-		}
-		if tw.Labels[v1.LabelPolicy] != labels[v1.LabelPolicy] || !equality.Semantic.DeepEqual(tw.OwnerReferences, owners) ||
-			tw.Spec != spec {
-			if tw.Labels == nil {
-				tw.Labels = map[string]string{}
-			}
-			tw.Labels[v1.LabelPolicy] = labels[v1.LabelPolicy]
-			tw.OwnerReferences, tw.Spec = owners, spec
-			if err := r.Update(ctx, tw); err != nil {
-				return err
-			}
-		}
-	}
 
 	paused := policy.Annotations[v1.AnnoPaused] == "true" || t.Object.GetAnnotations()[v1.AnnoPaused] == "true"
 	conflict := metav1.Condition{Type: v1.CondConflict, Status: metav1.ConditionFalse, Reason: "none"}
@@ -214,18 +221,64 @@ func (r *TidePolicyReconciler) ensureTideWorkload(
 	if paused {
 		pausedCond.Status, pausedCond.Reason = metav1.ConditionTrue, "paused"
 	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	setConds := func(tw *v1.TideWorkload) bool {
+		changed := meta.SetStatusCondition(&tw.Status.Conditions, conflict)
+		return meta.SetStatusCondition(&tw.Status.Conditions, pausedCond) || changed
+	}
+
+	tw := &v1.TideWorkload{}
+	err = r.Get(ctx, key, tw)
+	switch {
+	case apierrors.IsNotFound(err):
+		tw = &v1.TideWorkload{
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, Labels: labels, OwnerReferences: owners},
+			Spec:       spec,
+		}
+		if err := r.Create(ctx, tw); err != nil {
+			return false, err
+		}
+		// Write conditions on the object Create returned: a cached read-back may
+		// not see it yet, and the engine must not act on it before this is set.
+		setConds(tw)
+		if err := r.Status().Update(ctx, tw); err == nil {
+			return false, nil
+		}
+	case err != nil:
+		return false, err
+	default:
+		if other := tw.Spec.PolicyRef; other != ref && slices.ContainsFunc(res.Targets[other], func(o workload.Target) bool {
+			return o.Namespace == t.Namespace && workload.TideWorkloadName(o.Ref) == key.Name
+		}) {
+			// Another live policy still selects this workload and owns the
+			// TideWorkload; leave it be rather than fight over it.
+			return false, nil
+		}
+		if tw.Labels[v1.LabelPolicy] != labels[v1.LabelPolicy] || !equality.Semantic.DeepEqual(tw.OwnerReferences, owners) ||
+			tw.Spec != spec {
+			if tw.Labels == nil {
+				tw.Labels = map[string]string{}
+			}
+			tw.Labels[v1.LabelPolicy] = labels[v1.LabelPolicy]
+			tw.OwnerReferences, tw.Spec = owners, spec
+			if err := r.Update(ctx, tw); err != nil {
+				return false, err
+			}
+		}
+	}
+
+	notFound := false
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &v1.TideWorkload{}
 		if err := r.Get(ctx, key, fresh); err != nil {
+			notFound = apierrors.IsNotFound(err)
 			return client.IgnoreNotFound(err)
 		}
-		changed := meta.SetStatusCondition(&fresh.Status.Conditions, conflict)
-		changed = meta.SetStatusCondition(&fresh.Status.Conditions, pausedCond) || changed
-		if !changed {
+		if !setConds(fresh) {
 			return nil
 		}
 		return r.Status().Update(ctx, fresh)
 	})
+	return notFound && err == nil, err
 }
 
 func (r *TidePolicyReconciler) updatePolicyStatus(

@@ -327,7 +327,13 @@ func (e *Engine) fetchTarget(ctx context.Context, tw *v1.TideWorkload) (workload
 		return workload.Target{}, false
 	}
 	t := workload.Target{Ref: ref, Namespace: tw.Namespace, Object: obj, Policy: tw.Spec.PolicyRef}
-	if c := meta.FindStatusCondition(tw.Status.Conditions, v1.CondConflict); c != nil && c.Status == metav1.ConditionTrue {
+	c := meta.FindStatusCondition(tw.Status.Conditions, v1.CondConflict)
+	if c == nil {
+		// The policy controller has not yet initialized this TideWorkload; it may
+		// be in conflict, so do nothing until it says otherwise.
+		return workload.Target{}, false
+	}
+	if c.Status == metav1.ConditionTrue {
 		t.Conflict = c.Message
 	}
 	return t, true

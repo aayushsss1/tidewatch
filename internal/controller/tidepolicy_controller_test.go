@@ -223,6 +223,47 @@ var _ = Describe("TidePolicy Controller", func() {
 		Expect(c.Message).To(ContainSubstring("multiple_policies:"))
 	})
 
+	It("sets Conflict on a newly created TideWorkload within a single Reconcile", func() {
+		p1 := policyIn(ns, "pol-a", nil)
+		p2 := policyIn(ns, "pol-b", nil)
+		DeferCleanup(teardown, p1, p2)
+		deploy(ns, webName, nil)
+		res := reconcileP(p1)
+		Expect(res.RequeueAfter).To(Equal(30 * time.Second))
+		tw, err := getTW(ns, webName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cond(tw.Status.Conditions, v1.CondConflict)).To(HaveField("Status", metav1.ConditionTrue))
+		Expect(cond(tw.Status.Conditions, v1.CondPaused)).NotTo(BeNil())
+	})
+
+	It("hands a shared TideWorkload to the remaining policy when the other is deleted", func() {
+		p1 := policyIn(ns, "pol-a", nil)
+		p2 := policyIn(ns, "pol-b", nil)
+		DeferCleanup(teardown, p1, p2)
+		deploy(ns, webName, nil)
+		settle(p1, p2)
+		tw, err := getTW(ns, webName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cond(tw.Status.Conditions, v1.CondConflict)).To(HaveField("Status", metav1.ConditionTrue))
+
+		owner := tw.Spec.PolicyRef.Name
+		gone, kept := p1, p2
+		if owner == "pol-b" {
+			gone, kept = p2, p1
+		}
+		Expect(k8sClient.Delete(ctx, gone)).To(Succeed())
+		reconcileP(gone)
+		tw, err = getTW(ns, webName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tw.Spec.PolicyRef.Name).To(Equal(kept.Name))
+		Expect(tw.Labels).To(HaveKeyWithValue(v1.LabelPolicy, ns+"."+kept.Name))
+
+		reconcileP(kept)
+		tw, err = getTW(ns, webName)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cond(tw.Status.Conditions, v1.CondConflict)).To(HaveField("Status", metav1.ConditionFalse))
+	})
+
 	It("marks Conflict when an HPA targets the Deployment", func() {
 		p := policyIn(ns, "pol", nil)
 		DeferCleanup(teardown, p)
