@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -59,7 +60,7 @@ var _ = Describe("CRD validation", func() {
 		Expect(p.Spec.Forecasting.Seasonality.Duration).To(Equal(24 * time.Hour))
 		Expect(p.Spec.Forecasting.AccuracyWindow.Duration).To(Equal(24 * time.Hour))
 		Expect(p.Spec.Forecasting.Models).To(Equal([]string{"holt-winters", "seasonal-naive"}))
-		Expect(p.Spec.Guardrails.MinReplicas).To(Equal(int32(1)))
+		Expect(p.Spec.Guardrails.MinReplicas).To(HaveValue(Equal(int32(1))))
 		Expect(p.Spec.Guardrails.ScaleUp.MaxStep).To(Equal(int32(5)))
 		Expect(p.Spec.Guardrails.ScaleUp.Cooldown.Duration).To(Equal(60 * time.Second))
 		Expect(p.Spec.Guardrails.ScaleDown.MaxStep).To(Equal(int32(2)))
@@ -70,16 +71,30 @@ var _ = Describe("CRD validation", func() {
 	It("rejects a non-decimal targetPerReplica", func() {
 		p := minimalPolicy("bad-decimal")
 		p.Spec.Load.Profiles["http"] = tidewatchv1alpha1.LoadProfile{Query: "up", TargetPerReplica: "fifty"}
-		Expect(k8sClient.Create(ctx, p)).NotTo(Succeed())
+		err := k8sClient.Create(ctx, p)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("targetPerReplica"))
 	})
 	It("rejects an empty kinds list", func() {
 		p := minimalPolicy("no-kinds")
-		p.Spec.Selector.Kinds = nil
-		Expect(k8sClient.Create(ctx, p)).NotTo(Succeed())
+		p.Spec.Selector.Kinds = []tidewatchv1alpha1.TargetKind{}
+		err := k8sClient.Create(ctx, p)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("kinds"))
+		Expect(err.Error()).To(ContainSubstring("should have at least 1 items"))
 	})
 	It("rejects mode outside the enum", func() {
 		p := minimalPolicy("bad-mode")
 		p.Spec.Mode = "Yolo"
-		Expect(k8sClient.Create(ctx, p)).NotTo(Succeed())
+		err := k8sClient.Create(ctx, p)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("mode"))
+	})
+	It("allows minReplicas 0", func() {
+		p := minimalPolicy("min-zero")
+		p.Spec.Guardrails.MinReplicas = new(int32(0))
+		Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(p), p)).To(Succeed())
+		Expect(p.Spec.Guardrails.MinReplicas).To(HaveValue(Equal(int32(0))))
 	})
 })
