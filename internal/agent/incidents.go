@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/rand"
 	"fmt"
 	"maps"
 	"slices"
@@ -95,6 +96,7 @@ type Manager struct {
 	o     Options
 	mu    sync.Mutex
 	seq   int
+	nonce string      // per-boot, keeps IDs unique across restarts
 	incs  []*Incident // creation order
 	times []time.Time // recent trigger times for storm counting
 	storm *Incident   // non-nil while in storm mode
@@ -102,7 +104,20 @@ type Manager struct {
 
 // NewManager returns a Manager. corr may be nil (time window only).
 func NewManager(clk clock.Clock, corr *Correlator, o Options) *Manager {
-	return &Manager{clk: clk, corr: corr, o: o.withDefaults()}
+	return &Manager{clk: clk, corr: corr, o: o.withDefaults(), nonce: bootNonce()}
+}
+
+// bootNonce returns 6 random base36 characters.
+func bootNonce() string {
+	const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // crypto/rand does not fail on supported platforms
+	}
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b)
 }
 
 // Add records a trigger, returning a snapshot of the incident it joined and
@@ -122,7 +137,7 @@ func (m *Manager) Add(t signal.Trigger) (inc *Incident, stormStarted bool) {
 	if m.storm == nil && len(m.times) > m.o.StormTriggers {
 		m.seq++
 		m.storm = &Incident{
-			ID: fmt.Sprintf("storm-%d", m.seq), Storm: true, Opened: now, Status: StatusOpen,
+			ID: fmt.Sprintf("storm-%s-%d", m.nonce, m.seq), Storm: true, Opened: now, Status: StatusOpen,
 			Members: map[types.UID]*Member{}, Lags: map[types.UID]time.Duration{},
 		}
 		m.incs = append(m.incs, m.storm)
@@ -137,7 +152,7 @@ func (m *Manager) Add(t signal.Trigger) (inc *Incident, stormStarted bool) {
 	if target == nil {
 		m.seq++
 		target = &Incident{
-			ID: fmt.Sprintf("%s-%d", t.Policy.Name, m.seq), Policy: t.Policy, Opened: now, Status: StatusOpen,
+			ID: fmt.Sprintf("%s-%s-%d", t.Policy.Name, m.nonce, m.seq), Policy: t.Policy, Opened: now, Status: StatusOpen,
 			Members: map[types.UID]*Member{}, Lags: map[types.UID]time.Duration{},
 		}
 		m.incs = append(m.incs, target)

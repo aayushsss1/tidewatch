@@ -31,7 +31,7 @@ func TestManager_GroupsWithinWindow(t *testing.T) {
 	a, _ := m.Add(trig("shop", "a", clk.Now()))
 	clk.Step(2 * time.Minute)
 	b, _ := m.Add(trig("shop", "b", clk.Now()))
-	if a.ID != "shop-1" || b.ID != a.ID || len(b.Members) != 2 {
+	if a.ID != "shop-"+m.nonce+"-1" || b.ID != a.ID || len(b.Members) != 2 {
 		t.Fatalf("a=%s b=%s members=%d", a.ID, b.ID, len(b.Members))
 	}
 	clk.Step(2 * time.Minute) // 4m since open, no correlation data
@@ -67,7 +67,7 @@ func TestManager_SeparatePoliciesSeparateIncidents(t *testing.T) {
 	m, clk := newMgr()
 	a, _ := m.Add(trig("shop", "a", clk.Now()))
 	b, _ := m.Add(trig("pay", "b", clk.Now()))
-	if a.ID == b.ID || b.ID != "pay-2" {
+	if a.ID == b.ID || b.ID != "pay-"+m.nonce+"-2" {
 		t.Fatalf("a=%s b=%s", a.ID, b.ID)
 	}
 }
@@ -178,5 +178,15 @@ func TestManager_StormInvestigatedOnce(t *testing.T) {
 	}
 	if r := m.TakeReady(); len(r) != 0 {
 		t.Fatalf("storm re-queued: %d", len(r))
+	}
+}
+
+func TestManager_IDsUniqueAcrossRestarts(t *testing.T) {
+	m1, clk := newMgr()
+	m2, _ := newMgr()
+	a, _ := m1.Add(trig("shop", "a", clk.Now()))
+	b, _ := m2.Add(trig("shop", "a", clk.Now()))
+	if a.ID == b.ID || len(m1.nonce) != 6 {
+		t.Fatalf("a=%s b=%s nonce=%q", a.ID, b.ID, m1.nonce)
 	}
 }
