@@ -19,6 +19,8 @@ import (
 )
 
 const (
+	nsRec    = "rec"
+	leadWL   = "lead"
 	leadName = "Web_Front"
 	ns1      = "rd1"
 	ns2      = "rd2"
@@ -33,7 +35,7 @@ func nsObj(n string) *corev1.Namespace {
 
 func view(id string, start time.Time) *IncidentView {
 	return &IncidentView{
-		ID: id, Policy: v1.PolicyRef{Namespace: "rec", Name: "pol"}, Lead: leadName,
+		ID: id, Policy: v1.PolicyRef{Namespace: nsRec, Name: "pol"}, Lead: leadName,
 		Start: start, Peak: start.Add(10 * time.Minute), End: start.Add(30 * time.Minute),
 		LeadNamespace: ns1,
 		LeadSeries:    rampSeries(60, func(i int) float64 { return float64(i + 1) }),
@@ -121,7 +123,7 @@ var _ = Describe("Reader", func() {
 		Expect(got).To(Equal([]string{"a-best", "b-good", "c-ok"}))
 
 		find := Finder(rd, func(w tools.WorkloadRef) (string, []string, Query, bool) {
-			return "rd1.p", []string{ns1, ns2}, q, w.Name == "lead"
+			return "rd1.p", []string{ns1, ns2}, q, w.Name == leadWL
 		})
 		sums, err := find(ctx(), tools.WorkloadRef{Namespace: ns1, Name: "lead"}, nil)
 		Expect(err).NotTo(HaveOccurred())

@@ -36,11 +36,14 @@ import (
 )
 
 const (
-	testNS  = "default"
-	testInc = "inc-1"
-	kConf   = "confidence"
-	kReason = "reason"
-	appsAPI = "apps/v1"
+	kOverrides    = "overrides"
+	scriptedName  = "scripted"
+	scriptedModel = "scripted-1"
+	testNS        = "default"
+	testInc       = "inc-1"
+	kConf         = "confidence"
+	kReason       = "reason"
+	appsAPI       = "apps/v1"
 )
 
 var (
@@ -290,7 +293,7 @@ func (f *fixture) propose(conf float64, ovs ...ovIn) {
 			ovs[i].End = end
 		}
 	}
-	f.script("propose_scaling", map[string]any{"overrides": ovs, kReason: "payday surge", kConf: conf}, 100)
+	f.script("propose_scaling", map[string]any{kOverrides: ovs, kReason: "payday surge", kConf: conf}, 100)
 }
 
 func (f *fixture) deadline() time.Time { return f.clk.Now().Add(time.Minute) }
@@ -356,7 +359,7 @@ func TestInvestigator_ManualExpiryCappedByTimeout(t *testing.T) {
 	start := f.clk.Now().Add(time.Hour)
 	f.script("propose_scaling", map[string]any{
 		kReason: "r", kConf: 0.9,
-		"overrides": []map[string]any{{
+		kOverrides: []map[string]any{{
 			"workload": "frontend-late-start", "minReplicas": 5,
 			"start": start.Format(time.RFC3339), "end": start.Add(30 * time.Minute).Format(time.RFC3339),
 		}},
@@ -373,7 +376,7 @@ func TestInvestigator_ManualExpiryCappedByWindowEnd(t *testing.T) {
 	end := f.clk.Now().Add(5 * time.Minute) // closes before the 10m approval timeout
 	f.script("propose_scaling", map[string]any{
 		kReason: "r", kConf: 0.9,
-		"overrides": []map[string]any{{
+		kOverrides: []map[string]any{{
 			"workload": "frontend-short", "minReplicas": 5, "end": end.Format(time.RFC3339),
 		}},
 	}, 100)
@@ -614,7 +617,7 @@ func TestInvestigator_AutoDecisionReachesStatus(t *testing.T) {
 	f.propose(0.9, ovIn{Workload: "frontend-dec", MinReplicas: 12})
 
 	res := f.iv.Investigate(f.ctx, f.incident("frontend-dec"), f.deadline())
-	if res.Verdict != v1.VerdictApplied || res.Provider != "scripted" || res.Model != "scripted-1" || res.PromptVersion != PromptVersion {
+	if res.Verdict != v1.VerdictApplied || res.Provider != scriptedName || res.Model != scriptedModel || res.PromptVersion != PromptVersion {
 		t.Fatalf("result = %+v", res)
 	}
 	f.clk.Step(time.Minute)
@@ -745,7 +748,7 @@ func TestInvestigator_AllDroppedLeavesHeldDecisionOnLead(t *testing.T) {
 		t.Fatalf("no held decision in status: %+v", tw.Status.Decisions)
 	}
 	if d.Source != v1.SourceAgent || d.IncidentID != testInc || !slices.Contains(d.Reasons, "out_of_scope") ||
-		d.Provider != "scripted" || d.Model != "scripted-1" || d.PromptVersion != PromptVersion {
+		d.Provider != scriptedName || d.Model != scriptedModel || d.PromptVersion != PromptVersion {
 		t.Errorf("decision = %+v", d)
 	}
 }

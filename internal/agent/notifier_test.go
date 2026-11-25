@@ -22,9 +22,12 @@ import (
 	"github.com/aayushsss1/tidewatch/pkg/llm"
 )
 
-const testInc7 = "inc-7"
+const (
+	testInc7 = "inc-7"
+	testShop = "shop"
+)
 
-var wlFrontend = workloadKey{ns: "shop", name: "frontend", uid: "u1"}
+var wlFrontend = workloadKey{ns: testShop, name: "frontend", uid: "u1"}
 
 type slackSink struct {
 	mu     sync.Mutex

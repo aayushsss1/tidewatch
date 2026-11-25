@@ -47,7 +47,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
-	for _, ns := range []string{"rec", ns1, ns2} {
+	for _, ns := range []string{nsRec, ns1, ns2} {
 		Expect(k8sClient.Create(ctx(), nsObj(ns))).To(Succeed())
 	}
 })
