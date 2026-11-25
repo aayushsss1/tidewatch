@@ -22,7 +22,7 @@ const (
 	webName        = "web"
 )
 
-var deployKind = v1.TargetKind{APIVersion: "apps/v1", Kind: kindDeployment}
+var deployKind = v1.TargetKind{APIVersion: appsV1, Kind: kindDeployment}
 
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -134,7 +134,7 @@ func TestResolveAll_HPAConflict(t *testing.T) {
 		"kind":       "HorizontalPodAutoscaler",
 		"metadata":   map[string]any{"namespace": "a", "name": webName},
 		"spec": map[string]any{"scaleTargetRef": map[string]any{
-			"apiVersion": "apps/v1", "kind": kindDeployment, "name": webName,
+			"apiVersion": appsV1, "kind": kindDeployment, "name": webName,
 		}},
 	}}
 	r := newResolver(deploy("a", webName, nil), deploy("a", "free", nil), hpa)
