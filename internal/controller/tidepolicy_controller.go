@@ -24,6 +24,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -323,13 +324,15 @@ func (r *TidePolicyReconciler) allPolicies(ctx context.Context, _ client.Object)
 	return reqs
 }
 
-// SetupWithManager registers the controller. Deployments and StatefulSets are
+// SetupWithManager registers the controller. Deployments, StatefulSets and HPAs are
 // watched; other kinds named in policies are picked up by the periodic requeue.
 func (r *TidePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1.TidePolicy{}).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.allPolicies)).
 		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.allPolicies)).
+		Watches(hpa, handler.EnqueueRequestsFromMapFunc(r.allPolicies)).
 		Named("tidepolicy").
 		Complete(r)
 }

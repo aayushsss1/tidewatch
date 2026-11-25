@@ -24,7 +24,7 @@ type Target struct {
 	Namespace string
 	Object    *unstructured.Unstructured // labels/annotations/status for later use
 	Policy    v1.PolicyRef
-	Conflict  string // "" | "multiple_policies:<a>,<b>" | "hpa:<name>"
+	Conflict  string // "" | "multiple_policies:<a>,<b>" | "hpa:<name>" | "hpa_unknown"
 }
 
 // ScaleSupport reports whether a kind exposes a scale subresource.
@@ -164,6 +164,8 @@ func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (Re
 				t.Conflict = "multiple_policies:" + strings.Join(names, ",")
 			} else if h, ok := hpas[k]; ok {
 				t.Conflict = "hpa:" + h
+			} else if _, bad := hpaFailed[t.Namespace]; bad {
+				t.Conflict = "hpa_unknown" // fail closed: cannot rule out an HPA
 			}
 		}
 		out[ref] = ts
@@ -210,8 +212,8 @@ func (r *Resolver) namespaces(ctx context.Context, p *v1.TidePolicy) ([]string, 
 
 // hpaTargets maps each target key that an autoscaling/v2 HPA points at to the
 // HPA name, looking only in namespaces that contain resolved targets. Namespaces
-// whose HPA list failed are returned with a message; their targets simply get no
-// HPA conflict data.
+// whose HPA list failed are returned with a message; their targets are marked
+// Conflict "hpa_unknown" (fail closed) by the caller.
 func (r *Resolver) hpaTargets(ctx context.Context, resolved map[v1.PolicyRef][]Target) (map[targetKey]string, map[string]string) {
 	nss := map[string]struct{}{}
 	for _, ts := range resolved {

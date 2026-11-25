@@ -288,7 +288,7 @@ func TestResolveAll_HPAListFailureRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := v1.PolicyRef{Namespace: "a", Name: "p"}
-	if len(res.Targets[ref]) != 1 || res.Targets[ref][0].Conflict != "" {
+	if len(res.Targets[ref]) != 1 || res.Targets[ref][0].Conflict != "hpa_unknown" {
 		t.Fatalf("targets: %+v", res.Targets[ref])
 	}
 	if len(res.Issues[ref]) != 1 || !strings.Contains(res.Issues[ref][0], "hpa") {
