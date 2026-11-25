@@ -9,9 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +26,8 @@ import (
 type Notifier interface {
 	Pending(ctx context.Context, inc *Incident, pend map[types.UID]v1.PendingApproval)
 	Applied(ctx context.Context, inc *Incident, ovs map[types.UID]v1.Override, auto bool)
-	Resolved(ctx context.Context, incidentID string, verdict v1.Verdict, by string)
+	// Resolved reports that workload w's proposal of incidentID was settled.
+	Resolved(ctx context.Context, incidentID string, w workloadKey, verdict v1.Verdict, by string)
 	Skipped(ctx context.Context, inc *Incident, reason string)
 	// Storm reports a trigger storm. A nil policy means it spans all policies:
 	// then only Slack and the metric are used, with no Event.
@@ -40,7 +39,7 @@ type NoopNotifier struct{}
 
 func (NoopNotifier) Pending(context.Context, *Incident, map[types.UID]v1.PendingApproval) {}
 func (NoopNotifier) Applied(context.Context, *Incident, map[types.UID]v1.Override, bool)  {}
-func (NoopNotifier) Resolved(context.Context, string, v1.Verdict, string)                 {}
+func (NoopNotifier) Resolved(context.Context, string, workloadKey, v1.Verdict, string)    {}
 func (NoopNotifier) Skipped(context.Context, *Incident, string)                           {}
 func (NoopNotifier) Storm(context.Context, *v1.PolicyRef, int)                            {}
 
@@ -48,9 +47,8 @@ func (NoopNotifier) Storm(context.Context, *v1.PolicyRef, int)                  
 const slackTimeout = 5 * time.Second
 
 const (
-	maxSlackReason  = 300
-	maxStormEvents  = 10
-	maxKnownPending = 256
+	maxSlackReason = 300
+	maxStormEvents = 10
 
 	reasonOverrideProposed = "OverrideProposed"
 	reasonOverrideApplied  = "OverrideApplied"
@@ -59,6 +57,9 @@ const (
 	reasonOverrideExpired  = "OverrideExpired"
 	reasonSkippedEvent     = "InvestigationSkipped"
 	reasonStormEvent       = "StormDetected"
+
+	// verdictEnded is the Resolved verdict of an override whose window closed.
+	verdictEnded v1.Verdict = "ended"
 )
 
 type workloadKey struct {
@@ -71,10 +72,6 @@ type notifier struct {
 	url          string
 	notifyOnAuto func(v1.PolicyRef) bool
 	http         *http.Client
-
-	mu    sync.Mutex
-	known map[string][]workloadKey // pending incident id -> workloads, for follow-up events
-	order []string
 }
 
 // NewNotifier returns the Notifier that emits Kubernetes Events through rec
@@ -87,8 +84,7 @@ func NewNotifier(rec record.EventRecorder, webhookURL string, notifyOnAuto func(
 	}
 	return &notifier{
 		rec: rec, url: webhookURL, notifyOnAuto: notifyOnAuto,
-		http:  &http.Client{Timeout: slackTimeout},
-		known: map[string][]workloadKey{},
+		http: &http.Client{Timeout: slackTimeout},
 	}
 }
 
@@ -104,28 +100,6 @@ func memberKeys(inc *Incident, uids []types.UID) []workloadKey {
 		}
 	}
 	return out
-}
-
-func (n *notifier) remember(id string, ws []workloadKey) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if _, ok := n.known[id]; !ok {
-		n.order = append(n.order, id)
-		if len(n.order) > maxKnownPending {
-			delete(n.known, n.order[0])
-			n.order = n.order[1:]
-		}
-	}
-	n.known[id] = ws
-}
-
-func (n *notifier) forget(id string) []workloadKey {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	ws := n.known[id]
-	delete(n.known, id)
-	n.order = slices.DeleteFunc(n.order, func(s string) bool { return s == id })
-	return ws
 }
 
 // post sends text to Slack. Failures are logged, never returned.
@@ -173,7 +147,6 @@ func window(o v1.Override) string {
 func (n *notifier) Pending(ctx context.Context, inc *Incident, pend map[types.UID]v1.PendingApproval) {
 	uids := sortedUIDs(pend)
 	ws := memberKeys(inc, uids)
-	n.remember(inc.ID, ws)
 	for _, w := range ws {
 		p := pend[w.uid]
 		n.rec.Eventf(n.twObject(w), corev1.EventTypeNormal, reasonOverrideProposed,
@@ -227,22 +200,24 @@ func (n *notifier) Applied(ctx context.Context, inc *Incident, ovs map[types.UID
 	n.post(ctx, strings.TrimRight(b.String(), "\n"))
 }
 
-func (n *notifier) Resolved(ctx context.Context, incidentID string, verdict v1.Verdict, by string) {
+func (n *notifier) Resolved(ctx context.Context, incidentID string, w workloadKey, verdict v1.Verdict, by string) {
 	reason, evType, word := reasonOverrideExpired, corev1.EventTypeNormal, string(verdict)
 	switch verdict {
 	case v1.VerdictApplied:
 		reason, word = reasonOverrideApproved, "approved"
 	case v1.VerdictRejected:
 		reason, evType, word = reasonOverrideRejected, corev1.EventTypeWarning, "rejected"
-	case v1.VerdictSuperseded:
-		word = "superseded"
-	case v1.VerdictExpired:
-		word = "expired"
 	}
-	for _, w := range n.forget(incidentID) {
-		n.rec.Eventf(n.twObject(w), evType, reason, "Proposal for incident %s %s", incidentID, word)
+	what := "Proposal"
+	if verdict == verdictEnded {
+		what = "Override"
 	}
-	msg := fmt.Sprintf("Tidewatch proposal for incident %s %s", slackText(incidentID), word)
+	n.rec.Eventf(n.twObject(w), evType, reason, "%s for incident %s %s", what, incidentID, word)
+	if verdict == verdictEnded { // routine: the Event is enough, no Slack follow-up
+		return
+	}
+	msg := fmt.Sprintf("Tidewatch proposal for incident %s on %s/%s %s", slackText(incidentID),
+		slackText(w.ns), slackText(w.name), word)
 	if by != "" && (verdict == v1.VerdictApplied || verdict == v1.VerdictRejected) {
 		msg += " by " + slackText(by)
 	}

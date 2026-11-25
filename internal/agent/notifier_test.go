@@ -24,6 +24,8 @@ import (
 
 const testInc7 = "inc-7"
 
+var wlFrontend = workloadKey{ns: "shop", name: "frontend", uid: "u1"}
+
 type slackSink struct {
 	mu     sync.Mutex
 	bodies []string
@@ -93,7 +95,7 @@ func TestNotifier_NoWebhookNoPost(t *testing.T) {
 	inc, pend := notifIncident()
 	n.Pending(context.Background(), inc, pend)
 	n.Applied(context.Background(), inc, map[types.UID]v1.Override{"u1": pend["u1"].Override}, true)
-	n.Resolved(context.Background(), testInc7, v1.VerdictExpired, "")
+	n.Resolved(context.Background(), testInc7, wlFrontend, v1.VerdictExpired, "")
 	n.Storm(context.Background(), nil, 25)
 	if len(sink.bodies) != 0 {
 		t.Fatalf("posted %d messages without a webhook", len(sink.bodies))
@@ -123,12 +125,12 @@ func TestNotifier_EmitsEvents(t *testing.T) {
 
 	n.Pending(ctx, inc, pend)
 	n.Applied(ctx, inc, ovs, false)
-	n.Resolved(ctx, testInc7, v1.VerdictApplied, "alice")
+	n.Resolved(ctx, testInc7, wlFrontend, v1.VerdictApplied, "alice")
 	n.Skipped(ctx, inc, "budget_exhausted")
 	n.Pending(ctx, inc, pend)
-	n.Resolved(ctx, testInc7, v1.VerdictRejected, "bob")
+	n.Resolved(ctx, testInc7, wlFrontend, v1.VerdictRejected, "bob")
 	n.Pending(ctx, inc, pend)
-	n.Resolved(ctx, testInc7, v1.VerdictExpired, "")
+	n.Resolved(ctx, testInc7, wlFrontend, v1.VerdictExpired, "")
 	n.Storm(ctx, nil, 3) // no policy: no event
 	n.Storm(ctx, &inc.Policy, 25)
 

@@ -95,6 +95,9 @@ func NewRunner(
 	if o.Clock == nil {
 		o.Clock = clock.RealClock{}
 	}
+	if store != nil {
+		store.SetClock(o.Clock.Now)
+	}
 	if o.Workers <= 0 {
 		o.Workers = defaultWorkers
 	}
@@ -156,6 +159,7 @@ func (r *Runner) Start(ctx context.Context) error {
 // incidents, queue ready ones and report the ones the queue dropped. It must
 // not be called concurrently with itself.
 func (r *Runner) RunOnce(ctx context.Context) {
+	r.announceResolutions(ctx)
 	r.drain(ctx)
 	now := r.clk.Now()
 	for _, inc := range r.mgr.Tick(now) {
@@ -173,6 +177,46 @@ func (r *Runner) RunOnce(ctx context.Context) {
 		r.notifier.Skipped(ctx, inc, SkipTooLate)
 	}
 	queueDepth.Set(float64(r.queue.Len()))
+}
+
+// announceResolutions reports the approvals, rejections, expiries and
+// supersessions the store queued since the last pass. Approvals also get the
+// Applied notification a human-approved override has not had yet.
+func (r *Runner) announceResolutions(ctx context.Context) {
+	for _, res := range r.store.TakeResolutions() {
+		sn, ok := r.eng.Snapshot(res.UID)
+		if !ok { // the workload is gone: nothing to tell
+			continue
+		}
+		w := workloadKey{ns: sn.TW.Namespace, name: sn.TW.Name, uid: res.UID}
+		var verdict v1.Verdict
+		switch res.Verdict {
+		case overrides.ResApproved:
+			verdict = v1.VerdictApplied
+		case overrides.ResRejected:
+			verdict = v1.VerdictRejected
+		case overrides.ResSuperseded:
+			verdict = v1.VerdictSuperseded
+		case overrides.ResEnded:
+			verdict = verdictEnded
+		default:
+			verdict = v1.VerdictExpired
+		}
+		r.notifier.Resolved(ctx, res.IncidentID, w, verdict, res.By)
+		if res.Verdict != overrides.ResApproved {
+			continue
+		}
+		ovs, _, _ := r.store.Snapshot(res.UID)
+		for _, o := range ovs {
+			if o.IncidentID != res.IncidentID {
+				continue
+			}
+			inc := &Incident{ID: res.IncidentID, Policy: sn.Policy, Members: map[types.UID]*Member{
+				res.UID: {Workload: sn.TW, UID: res.UID},
+			}}
+			r.notifier.Applied(ctx, inc, map[types.UID]v1.Override{res.UID: o}, false)
+		}
+	}
 }
 
 func (r *Runner) drain(ctx context.Context) {

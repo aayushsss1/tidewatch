@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -204,5 +205,65 @@ func TestRunner_SubmitNeverBlocksWhenFull(t *testing.T) {
 	}
 	if len(r.in) != triggerBuffer {
 		t.Errorf("buffered = %d, want %d", len(r.in), triggerBuffer)
+	}
+}
+
+func (f *fixture) pendOverride(name, incident string, expires time.Time) {
+	f.t.Helper()
+	uid := f.uids[name]
+	o := v1.Override{
+		ID: "ov-" + incident, IncidentID: incident, MinReplicas: 9,
+		Start: metav1.NewTime(f.clk.Now()), End: metav1.NewTime(f.clk.Now().Add(30 * time.Minute)),
+	}
+	if _, err := f.store.AddPending(uid, v1.PendingApproval{
+		IncidentID: incident, Override: o, Confidence: "0.9", Expires: metav1.NewTime(expires),
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func drainEvents(rec *record.FakeRecorder) string {
+	var all []string
+	for {
+		select {
+		case e := <-rec.Events:
+			all = append(all, e)
+		default:
+			return strings.Join(all, "\n")
+		}
+	}
+}
+
+func TestRunner_AnnouncesApprovalAndRejection(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Manual", "frontend-ann", "cart-ann")
+	r, rec := f.runner(true)
+	f.pendOverride("frontend-ann", "inc-a", f.clk.Now().Add(10*time.Minute))
+	f.pendOverride("cart-ann", "inc-b", f.clk.Now().Add(10*time.Minute))
+	f.store.Approve("inc-a", f.uids["frontend-ann"], "alice", f.clk.Now())
+	f.store.Reject("inc-b", f.uids["cart-ann"], "bob")
+
+	r.RunOnce(f.ctx)
+	evs := drainEvents(rec)
+	for _, want := range []string{"Normal OverrideApproved", "Normal OverrideApplied", "Warning OverrideRejected"} {
+		if !strings.Contains(evs, want) {
+			t.Errorf("missing %q in:\n%s", want, evs)
+		}
+	}
+	r.RunOnce(f.ctx)
+	if again := drainEvents(rec); again != "" {
+		t.Errorf("resolutions announced twice:\n%s", again)
+	}
+}
+
+func TestRunner_AnnouncesExpiry(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Manual", "frontend-exp")
+	r, rec := f.runner(true)
+	f.pendOverride("frontend-exp", "inc-x", f.clk.Now().Add(2*time.Minute))
+	f.clk.Step(3 * time.Minute)
+	f.store.Expire(f.clk.Now())
+
+	r.RunOnce(f.ctx)
+	if evs := drainEvents(rec); !strings.Contains(evs, "Normal OverrideExpired") {
+		t.Errorf("missing OverrideExpired in:\n%s", evs)
 	}
 }

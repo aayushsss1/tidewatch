@@ -102,10 +102,11 @@ func (loadQuerier) RangeSeries(_ context.Context, _ string, start, end time.Time
 
 // recNotifier records notifications.
 type recNotifier struct {
-	mu      sync.Mutex
-	pending []map[types.UID]v1.PendingApproval
-	applied []bool
-	skipped []string
+	mu       sync.Mutex
+	pending  []map[types.UID]v1.PendingApproval
+	applied  []bool
+	skipped  []string
+	resolved []string
 }
 
 func (r *recNotifier) Pending(_ context.Context, _ *Incident, p map[types.UID]v1.PendingApproval) {
@@ -119,8 +120,12 @@ func (r *recNotifier) Applied(_ context.Context, _ *Incident, _ map[types.UID]v1
 	defer r.mu.Unlock()
 	r.applied = append(r.applied, auto)
 }
-func (r *recNotifier) Resolved(context.Context, string, v1.Verdict, string) {}
-func (r *recNotifier) Storm(context.Context, *v1.PolicyRef, int)            {}
+func (r *recNotifier) Resolved(_ context.Context, id string, _ workloadKey, v v1.Verdict, _ string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resolved = append(r.resolved, id+":"+string(v))
+}
+func (r *recNotifier) Storm(context.Context, *v1.PolicyRef, int) {}
 func (r *recNotifier) Skipped(_ context.Context, _ *Incident, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -666,5 +671,24 @@ func TestValidateProposal_InvalidWindowAndStartCap(t *testing.T) {
 		Workload: "a", MinReplicas: 3, Start: now.Add(10 * time.Hour), End: now.Add(time.Hour + time.Minute)}), inc, maxFor, 0.6, now)
 	if len(out) != 0 || reasons[0] != reasonWindowClamp || reasons[len(reasons)-1] != "invalid_window" {
 		t.Errorf("invalid window: %v %v", out, reasons)
+	}
+}
+
+func TestInvestigator_SupersededPendingBecomesDecision(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Manual", "frontend-sup")
+	f.propose(0.8, ovIn{Workload: "frontend-sup", MinReplicas: 9})
+	f.iv.Investigate(f.ctx, f.incident("frontend-sup"), f.deadline())
+	f.store.TakeDecisions(f.uids["frontend-sup"]) // the first proposal's own decision
+	f.prov.Calls = nil
+	f.propose(0.8, ovIn{Workload: "frontend-sup", MinReplicas: 11})
+	f.prov.Turns = f.prov.Turns[1:] // replay only the second proposal
+	f.iv.Investigate(f.ctx, f.incident("frontend-sup"), f.deadline())
+
+	found := false
+	for _, d := range f.store.TakeDecisions(f.uids["frontend-sup"]) {
+		found = found || (d.Verdict == v1.VerdictSuperseded && d.IncidentID == testInc && d.Desired == 9)
+	}
+	if !found {
+		t.Fatal("no superseded decision for the replaced pending approval")
 	}
 }

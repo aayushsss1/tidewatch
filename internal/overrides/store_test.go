@@ -322,3 +322,53 @@ func TestStore_ApproveAndRejectActOnOneWorkload(t *testing.T) {
 		t.Fatalf("f must not inherit e's tombstone: %q", v)
 	}
 }
+
+func TestStore_QueuesResolutions(t *testing.T) {
+	s := NewStore()
+	s.SetClock(func() time.Time { return t0 })
+	add := func(inc string, uid types.UID, exp time.Time) {
+		t.Helper()
+		if _, err := s.AddPending(uid, pend(inc, 6, t0, t0.Add(time.Hour), exp)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("ap", "a", t0.Add(10*time.Minute))
+	s.Approve("ap", "a", "alice", t0.Add(time.Minute))
+	add("rj", "a", t0.Add(10*time.Minute))
+	s.Reject("rj", "a", "bob")
+	add("ex", "a", t0.Add(2*time.Minute))
+	add("sp", "a", t0.Add(10*time.Minute))
+	add("sp", "a", t0.Add(10*time.Minute)) // supersedes the first sp
+	s.Expire(t0.Add(3 * time.Minute))      // ex expires; the approved override "ap" is still active
+	s.Expire(t0.Add(2 * time.Hour))        // the approved override ends, sp expires
+
+	got := map[string][]ResolutionVerdict{}
+	for _, r := range s.TakeResolutions() {
+		got[r.IncidentID] = append(got[r.IncidentID], r.Verdict)
+		if r.UID != "a" || r.Time.IsZero() {
+			t.Fatalf("bad resolution %+v", r)
+		}
+	}
+	want := map[string][]ResolutionVerdict{
+		"ap": {ResApproved, ResEnded}, "rj": {ResRejected}, "ex": {ResExpired},
+		"sp": {ResSuperseded, ResExpired},
+	}
+	for k, w := range want {
+		if len(got[k]) != len(w) || got[k][0] != w[0] || (len(w) > 1 && got[k][1] != w[1]) {
+			t.Fatalf("%s: got %v want %v", k, got[k], w)
+		}
+	}
+	if len(s.TakeResolutions()) != 0 {
+		t.Fatal("queue must be drained")
+	}
+	for range 300 {
+		s.Reject("x", "a", "b") // no-op: nothing pending
+	}
+	for i := range 300 {
+		add("n"+string(rune('0'+i%10)), types.UID("u"+string(rune('a'+i%26))), t0.Add(time.Hour))
+		s.Reject("n"+string(rune('0'+i%10)), types.UID("u"+string(rune('a'+i%26))), "b")
+	}
+	if n := len(s.TakeResolutions()); n != 256 {
+		t.Fatalf("queue should be bounded at 256, got %d", n)
+	}
+}

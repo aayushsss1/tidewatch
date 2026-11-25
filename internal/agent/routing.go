@@ -107,9 +107,18 @@ func (iv *Investigator) route(
 			Reason: p.Reason, Trace: trace,
 			Expires: metav1.NewTime(minTime(now.Add(timeout), o.Start.Add(approvalStartGrace))),
 		}
-		if _, err := iv.Store.AddPending(uid, pa); err != nil {
+		superseded, err := iv.Store.AddPending(uid, pa)
+		if err != nil {
 			log.Error(err, "Storing pending approval", "workload", uid)
 			continue
+		}
+		for _, old := range superseded { // the audit trail shows what the new proposal replaced
+			iv.Store.AddDecision(uid, v1.Decision{
+				Time: metav1.NewTime(now), Source: v1.SourceAgent, Desired: old.Override.MinReplicas,
+				Final: old.Override.MinReplicas, Verdict: v1.VerdictSuperseded, IncidentID: old.IncidentID,
+				Reasons: []string{"superseded"}, PromptVersion: PromptVersion,
+				Provider: iv.Provider.Name(), Model: iv.Provider.Model(),
+			})
 		}
 		pend[uid] = pa
 		iv.outcome(uid, d, v1.VerdictPending, o.MinReplicas)

@@ -18,15 +18,38 @@ import (
 
 // Invariants enforced here because the CRD intentionally has no CEL rule on status.
 const (
-	MaxWindow     = 2 * time.Hour
-	DefaultWindow = 30 * time.Minute
-	MaxReasonLen  = 300 // runes
-	MaxOverrides  = 3
-	MaxPending    = 3
-	MaxOutcomes   = 10
-	MaxDecisions  = 10
-	maxTombstones = 128
+	MaxWindow      = 2 * time.Hour
+	DefaultWindow  = 30 * time.Minute
+	MaxReasonLen   = 300 // runes
+	MaxOverrides   = 3
+	MaxPending     = 3
+	MaxOutcomes    = 10
+	MaxDecisions   = 10
+	maxTombstones  = 128
+	maxResolutions = 256
 )
+
+// ResolutionVerdict says how a pending approval or an override ended.
+type ResolutionVerdict string
+
+// Resolution verdicts.
+const (
+	ResApproved   ResolutionVerdict = "approved"
+	ResRejected   ResolutionVerdict = "rejected"
+	ResExpired    ResolutionVerdict = "expired"
+	ResSuperseded ResolutionVerdict = "superseded"
+	ResEnded      ResolutionVerdict = "ended"
+)
+
+// Resolution is a queued record that a proposal of one workload was settled,
+// so the agent can announce it. See TakeResolutions.
+type Resolution struct {
+	IncidentID string
+	UID        types.UID
+	Verdict    ResolutionVerdict
+	By         string
+	Time       time.Time
+}
 
 type workloadData struct {
 	overrides []v1.Override
@@ -47,6 +70,38 @@ type Store struct {
 	data  map[types.UID]*workloadData
 	dirty map[types.UID]struct{}
 	tombs []tombstone // verdicts of pending approvals that can no longer be applied
+	res   []Resolution
+	now   func() time.Time
+}
+
+// SetClock sets the time source used to stamp resolutions that carry no time
+// of their own. It defaults to time.Now.
+func (s *Store) SetClock(now func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = now
+}
+
+func (s *Store) resolve(incident string, uid types.UID, v ResolutionVerdict, by string, at time.Time) {
+	if at.IsZero() {
+		at = time.Now()
+		if s.now != nil {
+			at = s.now()
+		}
+	}
+	s.res = append(s.res, Resolution{IncidentID: incident, UID: uid, Verdict: v, By: by, Time: at})
+	if len(s.res) > maxResolutions {
+		s.res = s.res[len(s.res)-maxResolutions:]
+	}
+}
+
+// TakeResolutions returns the queued resolutions, oldest first, and clears the queue.
+func (s *Store) TakeResolutions() []Resolution {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.res
+	s.res = nil
+	return out
 }
 
 // NewStore returns an empty store.
@@ -123,6 +178,7 @@ func (s *Store) AddPending(uid types.UID, p v1.PendingApproval) (superseded []v1
 	d.pending = slices.DeleteFunc(d.pending, func(x v1.PendingApproval) bool {
 		if x.IncidentID == p.IncidentID {
 			superseded = append(superseded, x)
+			s.resolve(x.IncidentID, uid, ResSuperseded, "", time.Time{})
 			return true
 		}
 		return false
@@ -130,6 +186,7 @@ func (s *Store) AddPending(uid types.UID, p v1.PendingApproval) (superseded []v1
 	d.pending = append(d.pending, p)
 	for len(d.pending) > MaxPending {
 		s.tombstone(d.pending[0].IncidentID, uid, v1.VerdictSuperseded)
+		s.resolve(d.pending[0].IncidentID, uid, ResSuperseded, "", time.Time{})
 		superseded = append(superseded, d.pending[0])
 		d.pending = d.pending[1:]
 	}
@@ -160,6 +217,7 @@ func (s *Store) AddOverride(uid types.UID, o v1.Override) error {
 	if slices.ContainsFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == o.IncidentID }) {
 		d.pending = slices.DeleteFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == o.IncidentID })
 		s.tombstone(o.IncidentID, uid, v1.VerdictSuperseded)
+		s.resolve(o.IncidentID, uid, ResSuperseded, "", time.Time{})
 	}
 	s.addOverrideLocked(uid, o)
 	return nil
@@ -185,15 +243,17 @@ func (s *Store) Approve(incidentID string, uid types.UID, by string, now time.Ti
 	s.dirty[uid] = struct{}{}
 	if !p.Expires.After(now) {
 		s.tombstone(incidentID, uid, v1.VerdictExpired)
+		s.resolve(incidentID, uid, ResExpired, "", now)
 		return v1.VerdictExpired
 	}
 	p.Override.ApprovedBy = by
 	s.addOverrideLocked(uid, p.Override)
+	s.resolve(incidentID, uid, ResApproved, by, now)
 	return v1.VerdictApplied
 }
 
 // Reject drops uid's pending approval of incidentID and reports whether there was one.
-func (s *Store) Reject(incidentID string, uid types.UID, _ string) bool {
+func (s *Store) Reject(incidentID string, uid types.UID, by string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.data[uid]
@@ -206,6 +266,7 @@ func (s *Store) Reject(incidentID string, uid types.UID, _ string) bool {
 		return false
 	}
 	s.dirty[uid] = struct{}{}
+	s.resolve(incidentID, uid, ResRejected, by, time.Time{})
 	return true
 }
 
@@ -222,6 +283,7 @@ func (s *Store) Expire(now time.Time) (expiredPending map[types.UID][]v1.Pending
 			}
 			expiredPending[uid] = append(expiredPending[uid], p)
 			s.tombstone(p.IncidentID, uid, v1.VerdictExpired)
+			s.resolve(p.IncidentID, uid, ResExpired, "", now)
 			return true
 		})
 		d.overrides = slices.DeleteFunc(d.overrides, func(o v1.Override) bool {
@@ -229,6 +291,7 @@ func (s *Store) Expire(now time.Time) (expiredPending map[types.UID][]v1.Pending
 				return false
 			}
 			endedOverrides[uid] = append(endedOverrides[uid], o)
+			s.resolve(o.IncidentID, uid, ResEnded, "", now)
 			return true
 		})
 		if len(expiredPending[uid]) > 0 || len(endedOverrides[uid]) > 0 {
