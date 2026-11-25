@@ -23,7 +23,7 @@ const (
 const (
 	maxToolResultBytes = 4096
 	maxArgsBytes       = 200
-	turnMaxTokens      = 2048
+	turnMaxTokens      = 8192
 )
 
 // Limits bounds the loop. The deadline comes from the context.
@@ -88,12 +88,20 @@ func Run(
 		}
 	}
 
+	var lastIn, growth int
 	for turn := 1; ; turn++ {
-		if lim.MaxTokens > 0 && out.InputTokens+out.OutputTokens > lim.MaxTokens {
+		used := out.InputTokens + out.OutputTokens
+		if lim.MaxTokens > 0 && used > lim.MaxTokens {
 			out.Exit = ExitTokenCap
 			return out, trace, nil
 		}
 		final := turn >= lim.MaxToolCalls
+		// Soft budget: if the next turn is projected to cross the cap (input
+		// keeps growing by about what it grew last turn), make this the forced
+		// final turn instead of running out of budget mid-investigation.
+		if lim.MaxTokens > 0 && used+growth+turnMaxTokens > lim.MaxTokens {
+			final = true
+		}
 		req := TurnRequest{System: system, Messages: msgs, Tools: all, Choice: ChoiceAuto, MaxTokens: turnMaxTokens}
 		if final {
 			req.Tools, req.Choice = terminal, ChoiceFinal
@@ -112,6 +120,8 @@ func Run(
 			out.Exit = ExitProviderError
 			return out, trace, err
 		}
+		growth = max(resp.InputTokens-lastIn, 0)
+		lastIn = resp.InputTokens
 		out.InputTokens += resp.InputTokens
 		out.OutputTokens += resp.OutputTokens
 

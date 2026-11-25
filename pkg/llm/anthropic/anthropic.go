@@ -62,12 +62,14 @@ func (p *provider) Turn(ctx context.Context, req llm.TurnRequest) (llm.TurnRespo
 		params.Tools = append(params.Tools, sdk.ToolUnionParam{OfTool: &tp})
 	}
 	if len(req.Tools) > 0 {
-		if req.Choice == llm.ChoiceFinal {
-			params.ToolChoice = sdk.ToolChoiceUnionParam{OfAny: &sdk.ToolChoiceAnyParam{}}
-		} else {
-			params.ToolChoice = sdk.ToolChoiceUnionParam{OfAuto: &sdk.ToolChoiceAutoParam{}}
-		}
+		// ChoiceFinal is also "auto": the loop already offers only terminal
+		// tools on the final turn, and some current models reject a forced
+		// any/tool choice.
+		params.ToolChoice = sdk.ToolChoiceUnionParam{OfAuto: &sdk.ToolChoiceAutoParam{
+			DisableParallelToolUse: sdk.Bool(true),
+		}}
 	}
+	params.OutputConfig = sdk.OutputConfigParam{Effort: sdk.OutputConfigEffortMedium}
 
 	resp, err := p.client.Messages.New(ctx, params)
 	if err != nil {
@@ -89,6 +91,11 @@ func (p *provider) Turn(ctx context.Context, req llm.TurnRequest) (llm.TurnRespo
 				out.Message.ToolCall = &llm.ToolCall{ID: tu.ID, Name: tu.Name, Input: tu.Input}
 			}
 		}
+	}
+	if resp.StopReason == sdk.StopReasonMaxTokens {
+		// A reply cut off by the token limit may carry a truncated tool call;
+		// drop it so the loop treats the turn as no_tool_call.
+		out.Message.ToolCall = nil
 	}
 	return out, nil
 }

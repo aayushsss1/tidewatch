@@ -43,6 +43,7 @@ var (
 	lim      = llm.Limits{MaxToolCalls: 5, MaxTokens: 100000}
 	twoTurns = llm.Limits{MaxToolCalls: 2, MaxTokens: 1000000}
 	capped   = llm.Limits{MaxToolCalls: 10, MaxTokens: 30000}
+	soft     = llm.Limits{MaxToolCalls: 10, MaxTokens: 60000}
 )
 
 const (
@@ -126,10 +127,27 @@ func TestRun_TokenCap(t *testing.T) {
 	q := &fakeTool{name: toolQuery, out: "x"}
 	end := &fakeTool{name: toolEnd, terminal: true}
 	p := &llmtest.Scripted{Turns: []llm.TurnResponse{
-		tokens(call(toolQuery), 15000, 5000), tokens(call(toolQuery), 15000, 5000), call(toolEnd)}}
+		tokens(call(toolQuery), 30000, 5000), call(toolEnd)}}
 	out, _, _ := llm.Run(context.Background(), p, "s", "b", []llm.Tool{q, end}, capped)
-	if out.Exit != "token_cap" || len(p.Calls) != 2 || out.InputTokens != 30000 || out.OutputTokens != 10000 {
+	if out.Exit != "token_cap" || len(p.Calls) != 1 || out.InputTokens != 30000 || out.OutputTokens != 5000 {
 		t.Fatalf("out=%+v calls=%d", out, len(p.Calls))
+	}
+}
+
+func TestRun_ProjectedOverrunForcesFinal(t *testing.T) {
+	q := &fakeTool{name: toolQuery, out: "x"}
+	end := &fakeTool{name: toolEnd, terminal: true}
+	// Input grows 17k on turn 2; used(38000)+growth(17000)+8192 > 60000, so
+	// turn 3 must be the forced final turn even though used < cap.
+	p := &llmtest.Scripted{Turns: []llm.TurnResponse{
+		tokens(call(toolQuery), 10000, 500), tokens(call(toolQuery), 27000, 500), call(toolEnd)}}
+	out, _, _ := llm.Run(context.Background(), p, "s", "b", []llm.Tool{q, end}, soft)
+	if out.Exit != llm.ExitForcedFinal || len(p.Calls) != 3 {
+		t.Fatalf("out=%+v calls=%d", out, len(p.Calls))
+	}
+	last := p.Calls[2]
+	if last.Choice != llm.ChoiceFinal || len(last.Tools) != 1 || p.Calls[1].Choice != llm.ChoiceAuto {
+		t.Fatalf("calls[1]=%s last=%+v", p.Calls[1].Choice, last)
 	}
 }
 

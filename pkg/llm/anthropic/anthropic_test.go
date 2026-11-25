@@ -87,7 +87,7 @@ func TestTurn_SendsToolsAndParsesToolUse(t *testing.T) {
 	}
 }
 
-func TestTurn_FinalChoiceForcesToolUse(t *testing.T) {
+func TestTurn_FinalChoiceIsAutoWithSingleToolUse(t *testing.T) {
 	p, body := fake(t, 200, toolUseReply)
 	_, err := p.Turn(context.Background(), llm.TurnRequest{
 		Messages: []llm.Message{{Role: llm.RoleUser, Text: "go"}},
@@ -97,8 +97,27 @@ func TestTurn_FinalChoiceForcesToolUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := *body
-	if b["tool_choice"].(map[string]any)["type"] != "any" || len(b["tools"].([]any)) != 1 {
+	tc := b["tool_choice"].(map[string]any)
+	if tc["type"] != "auto" || tc["disable_parallel_tool_use"] != true || len(b["tools"].([]any)) != 1 {
 		t.Fatalf("body = %v", b)
+	}
+	if b["output_config"].(map[string]any)["effort"] != "medium" {
+		t.Fatalf("output_config = %v", b["output_config"])
+	}
+}
+
+func TestTurn_MaxTokensStopDropsToolCall(t *testing.T) {
+	reply := `{"id":"msg_2","type":"message","role":"assistant","model":"claude-test",
+"content":[{"type":"text","text":"partial"},
+{"type":"tool_use","id":"toolu_2","name":"query_prometheus","input":{}}],
+"stop_reason":"max_tokens","usage":{"input_tokens":1,"output_tokens":2}}`
+	p, _ := fake(t, 200, reply)
+	resp, err := p.Turn(context.Background(), llm.TurnRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Text: "go"}},
+		Tools:    []llm.ToolDef{queryTool}, Choice: llm.ChoiceAuto, MaxTokens: 10,
+	})
+	if err != nil || resp.Message.ToolCall != nil || resp.Message.Text != "partial" {
+		t.Fatalf("resp=%+v err=%v", resp, err)
 	}
 }
 
