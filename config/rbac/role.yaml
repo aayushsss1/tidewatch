@@ -23,7 +23,9 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - controllerrevisions
   - deployments
+  - replicasets
   - statefulsets
   verbs:
   - get

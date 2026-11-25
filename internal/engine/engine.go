@@ -73,6 +73,7 @@ type Engine struct {
 	mu     sync.Mutex
 	states map[types.UID]*wlState
 	proms  map[string]*promEntry
+	snaps  map[types.UID]Snapshot
 }
 
 // New builds an Engine, applying defaults to opts.
@@ -98,7 +99,7 @@ func New(c client.Client, opts Options) *Engine {
 	registerMetrics()
 	return &Engine{
 		c: c, scale: opts.Scale, opts: opts, clock: opts.Clock, ov: opts.Overrides,
-		states: map[types.UID]*wlState{}, proms: map[string]*promEntry{},
+		states: map[types.UID]*wlState{}, proms: map[string]*promEntry{}, snaps: map[types.UID]Snapshot{},
 		debounce: signal.NewDebouncer(), notesCache: map[v1.PolicyRef]*notesEntry{},
 	}
 }
@@ -188,6 +189,7 @@ func (e *Engine) prune(list *v1.TideWorkloadList) {
 			continue
 		}
 		delete(e.states, uid)
+		delete(e.snaps, uid)
 		e.debounce.Forget(uid)
 		for _, p := range e.proms {
 			p.col.Forget(string(uid))
@@ -354,6 +356,7 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 	e.detectTriggers(ctx, it, gaps.Healthy())
 	e.applyOverride(it)
 	e.sampleOverrides(it)
+	e.saveSnapshot(it, series)
 	it.enforce = true
 	e.recordPhase1Metrics(it)
 	return it
