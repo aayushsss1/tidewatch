@@ -96,7 +96,7 @@ func (t *Tracker) Observe(actual Series, now time.Time) {
 				continue
 			}
 			idx, ok := nearest(len(actual.Points), func(i int) time.Time { return actual.Points[i].T }, p.target, t.step)
-			if !ok || math.IsNaN(actual.Points[idx].V) {
+			if !ok || math.IsNaN(actual.Points[idx].V) || math.IsInf(actual.Points[idx].V, 0) {
 				continue
 			}
 			a := actual.Points[idx].V
@@ -171,7 +171,11 @@ func (t *Tracker) Trusted(minSamples int) (string, bool) {
 			}
 			sum += s.SMAPE
 		}
-		if mean := sum / float64(len(ss)); ok && (!found || mean < bestMean) {
+		mean := sum / float64(len(ss))
+		if math.IsNaN(mean) || math.IsInf(mean, 0) {
+			continue
+		}
+		if ok && (!found || mean < bestMean) {
 			best, bestMean, found = model, mean, true
 		}
 	}

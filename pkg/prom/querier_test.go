@@ -95,3 +95,15 @@ func TestReady(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestRangeSeries_InfSampleIsNaN(t *testing.T) {
+	s := fmt.Sprintf(`{"metric":{},"values":[[%d,"1"],[%d,"+Inf"],[%d,"NaN"]]}`, t0.Unix(), t0.Unix()+1, t0.Unix()+2)
+	q := serve(t, 200, matrix(s))
+	got, err := q.RangeSeries(context.Background(), "up", t0, t0.Add(2*time.Second), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Points[0].V != 1 || !math.IsNaN(got.Points[1].V) || !math.IsNaN(got.Points[2].V) {
+		t.Fatalf("got %+v", got.Points)
+	}
+}

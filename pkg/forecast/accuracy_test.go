@@ -170,3 +170,37 @@ func TestTracker_BothZeroIsZeroError(t *testing.T) {
 		t.Fatalf("score = %+v, ok=%v", s, ok)
 	}
 }
+
+func TestTracker_InfActualDoesNotPoisonTrusted(t *testing.T) {
+	step := time.Minute
+	tr := NewTracker(6*step, step, time.Hour)
+	tr.Record(constForecast("a", t0, step, 6, 100, 5), t0)
+	act := constActual(step, 10, 100)
+	for i := range act.Points {
+		if i == 6 {
+			act.Points[i].V = math.Inf(1)
+		}
+	}
+	tr.Observe(act, t0.Add(6*step))
+	for _, s := range tr.Scores() {
+		if math.IsNaN(s.SMAPE) {
+			t.Fatalf("NaN score: %+v", s)
+		}
+	}
+	if _, ok := tr.Trusted(1); ok {
+		t.Fatalf("lead with only an Inf actual must not count as scored")
+	}
+}
+
+func TestTrusted_IgnoresNaNMeans(t *testing.T) {
+	tr := NewTracker(3*time.Minute, time.Minute, time.Hour)
+	k := trackerKey{"bad", time.Minute}
+	tr.scored[k] = []scoredPoint{{target: t0, smape: math.NaN()}}
+	for _, l := range tr.leads {
+		tr.scored[trackerKey{"bad", l}] = []scoredPoint{{target: t0, smape: math.NaN()}}
+		tr.scored[trackerKey{"good", l}] = []scoredPoint{{target: t0, smape: 0.5}}
+	}
+	if m, ok := tr.Trusted(1); !ok || m != "good" {
+		t.Fatalf("got %q %v", m, ok)
+	}
+}

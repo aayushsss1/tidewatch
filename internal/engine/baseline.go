@@ -33,12 +33,12 @@ func Baseline(in BaselineInput) BaselineResult {
 	}
 	var res BaselineResult
 	if in.Trusted != nil {
-		if upper, ok := in.Trusted.MaxUpper(in.Now.Add(in.TimeToReady + in.Margin)); ok && !math.IsNaN(upper) {
+		if upper, ok := in.Trusted.MaxUpper(in.Now.Add(in.TimeToReady + in.Margin)); ok && isFinite(upper) {
 			res.ForecastDesired = ceilDiv(upper, capacity)
 			res.OK = true
 		}
 	}
-	if !math.IsNaN(in.Actual) {
+	if isFinite(in.Actual) {
 		res.ReactiveFloor = ceilDiv(in.Actual, capacity)
 		res.OK = true
 	}
@@ -46,6 +46,13 @@ func Baseline(in BaselineInput) BaselineResult {
 	return res
 }
 
+func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// ceilDiv returns ceil(load/capacity), saturating at MaxInt32 for huge, Inf or NaN input.
 func ceilDiv(load, capacity float64) int32 {
-	return int32(math.Ceil(max(load, 0) / capacity))
+	r := math.Ceil(max(load, 0) / capacity)
+	if math.IsNaN(r) || r >= math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int32(r)
 }

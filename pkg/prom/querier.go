@@ -73,7 +73,9 @@ func (q *querier) RangeSeries(
 		if off+step/2 < 0 || i >= n {
 			continue
 		}
-		out.Points[i].V = float64(s.Value)
+		if v := float64(s.Value); !math.IsNaN(v) && !math.IsInf(v, 0) {
+			out.Points[i].V = v // non-finite samples stay NaN (missing)
+		}
 	}
 	return out, nil
 }

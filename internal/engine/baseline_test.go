@@ -69,3 +69,25 @@ func TestBaseline_ForecastOnlyWhenActualNaN(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+func TestBaseline_InfActualNotOK(t *testing.T) {
+	r := Baseline(baseIn(math.Inf(1), nil))
+	if r.OK {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestBaseline_HugeActualSaturates(t *testing.T) {
+	r := Baseline(baseIn(1e300, nil))
+	if !r.OK || r.Desired != math.MaxInt32 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestBaseline_InfForecastIgnored(t *testing.T) {
+	f := fc(forecast.ForecastPoint{T: t0.Add(2 * time.Minute), Upper: math.Inf(1)})
+	r := Baseline(baseIn(80, f))
+	if r.Desired != 2 {
+		t.Fatalf("%+v", r)
+	}
+}
