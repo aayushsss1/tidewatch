@@ -100,7 +100,21 @@ echo "EPOCH=$EPOCH PEAK=$PEAK"
 mkdir -p "$STATE_DIR"
 printf 'EPOCH=%s\nPEAK=%s\n' "$EPOCH" "$PEAK" > "$STATE_DIR/demo-state.env"
 
-k -n monitoring port-forward "svc/$PROM_SVC" 9090:9090 >"$STATE_DIR/demo-portforward.log" 2>&1 &
+# Free :9090 of a kubectl port-forward left by a previous run; refuse to touch anything else.
+if command -v lsof >/dev/null 2>&1; then
+  for pid in $(lsof -ti tcp:9090 -sTCP:LISTEN 2>/dev/null || true); do
+    if ps -o comm= -p "$pid" 2>/dev/null | grep -q kubectl; then
+      echo "killing stale kubectl port-forward on :9090 (pid $pid)"
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+    else
+      echo "port 9090 is in use by pid $pid ($(ps -o comm= -p "$pid" 2>/dev/null)); free it and re-run" >&2
+      exit 1
+    fi
+  done
+fi
+# Call kubectl directly (not the k() shell function) so $! is kubectl's PID and cleanup kills it.
+kubectl --context "$CTX" -n monitoring port-forward "svc/$PROM_SVC" 9090:9090 >"$STATE_DIR/demo-portforward.log" 2>&1 &
 PF_PID=$!
 for i in $(seq 1 60); do
   if curl -fsS "$PROM_LOCAL/-/ready" >/dev/null 2>&1; then break; fi
