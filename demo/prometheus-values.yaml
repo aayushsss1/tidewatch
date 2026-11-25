@@ -1,0 +1,29 @@
+# Slim kube-prometheus-stack for the Tidewatch demo (no Alertmanager, node-exporter, Grafana).
+alertmanager:
+  enabled: false
+grafana:
+  enabled: false
+nodeExporter:
+  enabled: false
+kubeStateMetrics:
+  enabled: true
+prometheusOperator:
+  admissionWebhooks:
+    enabled: false
+    patch:
+      enabled: false
+  tls:
+    enabled: false
+prometheus:
+  prometheusSpec:
+    enableRemoteWriteReceiver: true
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    scrapeInterval: 15s
+    retention: 6h
+    tsdb:
+      outOfOrderTimeWindow: 2h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi

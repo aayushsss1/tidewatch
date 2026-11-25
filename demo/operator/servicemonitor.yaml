@@ -1,0 +1,19 @@
+# Scrapes the operator's metrics over plain HTTP. hack/demo.sh runs the manager with
+# --metrics-secure=false (demo only) so Prometheus needs no bearer token or TLS config.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tidewatch-operator
+  namespace: tidewatch-system
+spec:
+  namespaceSelector:
+    matchNames: [tidewatch-system]
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: tidewatch
+  endpoints:
+    - port: https # service port name from config/default/metrics_service.yaml; serves HTTP in the demo
+      path: /metrics
+      scheme: http
+      interval: 15s

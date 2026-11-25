@@ -32,7 +32,16 @@ jobs:
       - name: Verify kind installation
         run: kind version
 
-      - name: Running Test e2e
+      - name: Install Helm
         run: |
-          go mod tidy
-          make test-e2e
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+      - name: Running demo e2e
+        run: make demo-e2e
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-tidewatch get pods -A || true
+          kubectl --context kind-tidewatch -n tidewatch-system logs deploy/tidewatch-controller-manager --tail=300 || true

@@ -63,36 +63,26 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# kubectl kuberc is disabled by default for test isolation; enable with:
-# - KUBECTL_KUBERC=true
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= tidewatch-test-e2e
+##@ Demo
 
-.PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+# The demo is also the e2e test: hack/demo.sh builds a kind cluster named "tidewatch" and the
+# Ginkgo spec in test/e2e asserts a prescale happens before the traffic peak.
+# Requires docker, kind, helm and kubectl.
+
+.PHONY: demo
+demo: ## Act 1: kind cluster, Prometheus, operator, shop apps, seeded history, demo policy.
+	./hack/demo.sh
+
+.PHONY: demo-down
+demo-down: ## Delete the demo kind cluster.
+	$(KIND) delete cluster --name tidewatch
+
+.PHONY: demo-e2e
+demo-e2e: manifests generate fmt vet ## Run hack/demo.sh and assert the prescale before the peak (needs docker, kind, helm).
+	go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout 30m
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
-
-.PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+test-e2e: demo-e2e ## Alias for demo-e2e.
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

@@ -1,0 +1,175 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: shop
+  labels:
+    app: frontend
+    tidewatch.dev/enabled: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        tidewatch.dev/enabled: "true"
+    spec:
+      containers:
+        - name: app
+          image: tidewatch-demo-app:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: CAPACITY_RPS
+              value: "50"
+            - name: STARTUP_DELAY
+              value: 45s
+            - name: DOWNSTREAM_URL
+              value: http://api.shop:8080/work
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: shop
+  labels:
+    app: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: shop
+  labels:
+    app: api
+    tidewatch.dev/enabled: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+        tidewatch.dev/enabled: "true"
+    spec:
+      containers:
+        - name: app
+          image: tidewatch-demo-app:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: CAPACITY_RPS
+              value: "50"
+            - name: STARTUP_DELAY
+              value: 45s
+            - name: DOWNSTREAM_URL
+              value: http://worker.shop:8080/work
+            - name: DOWNSTREAM_DELAY
+              value: 90s
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: shop
+  labels:
+    app: api
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: shop
+  labels:
+    app: worker
+    tidewatch.dev/enabled: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+        tidewatch.dev/enabled: "true"
+    spec:
+      containers:
+        - name: app
+          image: tidewatch-demo-app:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: CAPACITY_RPS
+              value: "50"
+            - name: STARTUP_DELAY
+              value: 45s
+            - name: DOWNSTREAM_DELAY
+              value: 90s
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  namespace: shop
+  labels:
+    app: worker
+spec:
+  selector:
+    app: worker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

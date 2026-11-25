@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: shop
+  namespace: shop
+spec:
+  namespaceSelector:
+    matchNames: [shop]
+  selector:
+    matchExpressions:
+      - { key: app, operator: Exists }
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        # Copy the pod's app label into the series; the operator's query joins on app.
+        - sourceLabels: [__meta_kubernetes_pod_label_app]
+          targetLabel: app
+        # Keep the pod namespace as the namespace label.
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
