@@ -3,11 +3,9 @@ package engine
 import (
 	"context"
 	"math"
-	"slices"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -80,15 +78,12 @@ func (e *Engine) consumeAnnotations(ctx context.Context, it *item) {
 
 	if hasApprove {
 		incident, who := splitApproval(approve)
-		applied, verdict := e.ov.Approve(incident, who, e.clock.Now())
-		switch verdict {
+		switch verdict := e.ov.Approve(incident, tw.UID, who, e.clock.Now()); verdict {
 		case v1.VerdictApplied:
-			if slicesContainsUID(applied, tw) {
-				ovs, _, _ := e.ov.Snapshot(tw.UID)
-				for _, o := range ovs {
-					if o.IncidentID == incident {
-						event(incident, o.MinReplicas, v1.VerdictApplied)
-					}
+			ovs, _, _ := e.ov.Snapshot(tw.UID)
+			for _, o := range ovs {
+				if o.IncidentID == incident {
+					event(incident, o.MinReplicas, v1.VerdictApplied)
 				}
 			}
 		case v1.VerdictExpired, v1.VerdictSuperseded:
@@ -99,7 +94,7 @@ func (e *Engine) consumeAnnotations(ctx context.Context, it *item) {
 	}
 	if hasReject {
 		incident, who := splitApproval(reject)
-		if uids := e.ov.Reject(incident, who); slicesContainsUID(uids, tw) {
+		if e.ov.Reject(incident, tw.UID, who) {
 			event(incident, 0, v1.VerdictRejected)
 		}
 	}
@@ -123,10 +118,6 @@ func (e *Engine) applyOverride(it *item) {
 		it.base.Desired = m
 		it.override = o
 	}
-}
-
-func slicesContainsUID(uids []types.UID, tw *v1.TideWorkload) bool {
-	return slices.Contains(uids, tw.UID)
 }
 
 // track accumulates the samples of one override until it can be scored.

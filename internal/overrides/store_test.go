@@ -6,6 +6,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 )
@@ -71,9 +72,8 @@ func TestStore_FutureOverrideNotActiveUntilStart(t *testing.T) {
 func TestStore_ApproveMovesPendingToOverride(t *testing.T) {
 	s := NewStore()
 	mustPend(t, s, pend("i1", 6, t0, t0.Add(time.Hour), t0.Add(10*time.Minute)))
-	applied, verdict := s.Approve("i1", "alice", t0.Add(time.Minute))
-	if verdict != v1.VerdictApplied || len(applied) != 1 || applied[0] != "u" {
-		t.Fatalf("got %v %v", applied, verdict)
+	if verdict := s.Approve("i1", "u", "alice", t0.Add(time.Minute)); verdict != v1.VerdictApplied {
+		t.Fatalf("got %v", verdict)
 	}
 	ovs, pend, _ := s.Snapshot("u")
 	if len(pend) != 0 || len(ovs) != 1 || ovs[0].ApprovedBy != "alice" || ovs[0].MinReplicas != 6 {
@@ -87,9 +87,8 @@ func TestStore_ApproveMovesPendingToOverride(t *testing.T) {
 func TestStore_ApproveAfterExpiryIsExpired(t *testing.T) {
 	s := NewStore()
 	mustPend(t, s, pend("i1", 6, t0, t0.Add(time.Hour), t0.Add(10*time.Minute)))
-	applied, verdict := s.Approve("i1", "alice", t0.Add(11*time.Minute))
-	if verdict != v1.VerdictExpired || len(applied) != 0 {
-		t.Fatalf("got %v %v", applied, verdict)
+	if verdict := s.Approve("i1", "u", "alice", t0.Add(11*time.Minute)); verdict != v1.VerdictExpired {
+		t.Fatalf("got %v", verdict)
 	}
 	if ovs, p, _ := s.Snapshot("u"); len(ovs) != 0 || len(p) != 0 {
 		t.Fatal("expired approval must not be applied or kept")
@@ -100,7 +99,7 @@ func TestStore_ApproveAfterExpiryIsExpired(t *testing.T) {
 	if len(exp["u"]) != 1 {
 		t.Fatalf("expected one expired pending, got %v", exp)
 	}
-	if _, v := s.Approve("i2", "alice", t0.Add(13*time.Minute)); v != v1.VerdictExpired {
+	if v := s.Approve("i2", "u", "alice", t0.Add(13*time.Minute)); v != v1.VerdictExpired {
 		t.Fatalf("got %v", v)
 	}
 }
@@ -109,7 +108,7 @@ func TestStore_ApproveSupersededIsSuperseded(t *testing.T) {
 	s := NewStore()
 	mustPend(t, s, pend("i1", 6, t0, t0.Add(time.Hour), t0.Add(10*time.Minute)))
 	mustAdd(t, s, ov("direct", "i1", 8, t0, t0.Add(time.Hour))) // newer outcome for the same incident
-	if _, v := s.Approve("i1", "alice", t0.Add(time.Minute)); v != v1.VerdictSuperseded {
+	if v := s.Approve("i1", "u", "alice", t0.Add(time.Minute)); v != v1.VerdictSuperseded {
 		t.Fatalf("got %v", v)
 	}
 	// A re-proposal for the same incident replaces the old pending one.
@@ -122,20 +121,19 @@ func TestStore_ApproveSupersededIsSuperseded(t *testing.T) {
 
 func TestStore_ApproveUnknownIncidentNoop(t *testing.T) {
 	s := NewStore()
-	applied, verdict := s.Approve("nope", "bob", t0)
-	if verdict != "" || len(applied) != 0 {
-		t.Fatalf("got %v %q", applied, verdict)
+	if verdict := s.Approve("nope", "u", "bob", t0); verdict != "" {
+		t.Fatalf("got %q", verdict)
 	}
-	if uids := s.Reject("nope", "bob"); len(uids) != 0 {
-		t.Fatalf("got %v", uids)
+	if s.Reject("nope", "u", "bob") {
+		t.Fatal("unknown incident rejected something")
 	}
 }
 
 func TestStore_RejectRemovesPending(t *testing.T) {
 	s := NewStore()
 	mustPend(t, s, pend("i1", 6, t0, t0.Add(time.Hour), t0.Add(10*time.Minute)))
-	if uids := s.Reject("i1", "bob"); len(uids) != 1 || uids[0] != "u" {
-		t.Fatalf("got %v", uids)
+	if !s.Reject("i1", "u", "bob") {
+		t.Fatal("reject found nothing")
 	}
 	if _, p, _ := s.Snapshot("u"); len(p) != 0 {
 		t.Fatal("pending should be gone")
@@ -185,7 +183,7 @@ func TestStore_RestoreFromStatus(t *testing.T) {
 	if ovs, p, o := s.Snapshot("u"); len(ovs) != 1 || len(p) != 1 || len(o) != 1 {
 		t.Fatalf("restore overwrote state: %v %v %v", ovs, p, o)
 	}
-	if _, v := s.Approve("i2", "x", t0.Add(time.Minute)); v != v1.VerdictApplied {
+	if v := s.Approve("i2", "u", "x", t0.Add(time.Minute)); v != v1.VerdictApplied {
 		t.Fatalf("restored pending not approvable: %v", v)
 	}
 }
@@ -281,5 +279,46 @@ func TestStore_DecisionsQueueBoundedAndDrained(t *testing.T) {
 	}
 	if s.TakeDecisions("unknown") != nil {
 		t.Error("unknown uid must yield nil")
+	}
+}
+
+func TestStore_ApproveAndRejectActOnOneWorkload(t *testing.T) {
+	s := NewStore()
+	for _, uid := range []types.UID{"a", "b"} {
+		if _, err := s.AddPending(uid, pend("i1", 6, t0, t0.Add(time.Hour), t0.Add(10*time.Minute))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v := s.Approve("i1", "a", "alice", t0.Add(time.Minute)); v != v1.VerdictApplied {
+		t.Fatalf("a: %v", v)
+	}
+	if ovs, p, _ := s.Snapshot("b"); len(ovs) != 0 || len(p) != 1 {
+		t.Fatalf("approving a must leave b pending: %+v %+v", ovs, p)
+	}
+	if !s.Reject("i1", "b", "bob") {
+		t.Fatal("b reject")
+	}
+	if ovs, _, _ := s.Snapshot("a"); len(ovs) != 1 {
+		t.Fatal("rejecting b must not touch a")
+	}
+	// Approving both works.
+	for _, uid := range []types.UID{"c", "d"} {
+		if _, err := s.AddPending(uid, pend("i2", 6, t0, t0.Add(time.Hour), t0.Add(10*time.Minute))); err != nil {
+			t.Fatal(err)
+		}
+		if v := s.Approve("i2", uid, "x", t0.Add(time.Minute)); v != v1.VerdictApplied {
+			t.Fatalf("%s: %v", uid, v)
+		}
+	}
+	// Tombstones are per (incident, uid).
+	if _, err := s.AddPending("e", pend("i3", 6, t0, t0.Add(time.Hour), t0.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	s.Expire(t0.Add(2 * time.Minute))
+	if v := s.Approve("i3", "e", "x", t0.Add(3*time.Minute)); v != v1.VerdictExpired {
+		t.Fatalf("e: %v", v)
+	}
+	if v := s.Approve("i3", "f", "x", t0.Add(3*time.Minute)); v != "" {
+		t.Fatalf("f must not inherit e's tombstone: %q", v)
 	}
 }

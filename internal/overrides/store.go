@@ -37,6 +37,7 @@ type workloadData struct {
 
 type tombstone struct {
 	incident string
+	uid      types.UID
 	verdict  v1.Verdict
 }
 
@@ -87,16 +88,16 @@ func normalize(o v1.Override) (v1.Override, error) {
 	return o, nil
 }
 
-func (s *Store) tombstone(incident string, v v1.Verdict) {
-	s.tombs = append(s.tombs, tombstone{incident, v})
+func (s *Store) tombstone(incident string, uid types.UID, v v1.Verdict) {
+	s.tombs = append(s.tombs, tombstone{incident, uid, v})
 	if len(s.tombs) > maxTombstones {
 		s.tombs = s.tombs[len(s.tombs)-maxTombstones:]
 	}
 }
 
-func (s *Store) verdictFor(incident string) v1.Verdict {
+func (s *Store) verdictFor(incident string, uid types.UID) v1.Verdict {
 	for _, t := range slices.Backward(s.tombs) {
-		if t.incident == incident {
+		if t.incident == incident && t.uid == uid {
 			return t.verdict
 		}
 	}
@@ -128,7 +129,7 @@ func (s *Store) AddPending(uid types.UID, p v1.PendingApproval) (superseded []v1
 	})
 	d.pending = append(d.pending, p)
 	for len(d.pending) > MaxPending {
-		s.tombstone(d.pending[0].IncidentID, v1.VerdictSuperseded)
+		s.tombstone(d.pending[0].IncidentID, uid, v1.VerdictSuperseded)
 		superseded = append(superseded, d.pending[0])
 		d.pending = d.pending[1:]
 	}
@@ -158,60 +159,54 @@ func (s *Store) AddOverride(uid types.UID, o v1.Override) error {
 	d := s.wl(uid)
 	if slices.ContainsFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == o.IncidentID }) {
 		d.pending = slices.DeleteFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == o.IncidentID })
-		s.tombstone(o.IncidentID, v1.VerdictSuperseded)
+		s.tombstone(o.IncidentID, uid, v1.VerdictSuperseded)
 	}
 	s.addOverrideLocked(uid, o)
 	return nil
 }
 
-// Approve applies the pending approval of incidentID on every workload that has
-// one. The verdict is applied, expired or superseded, or empty for an unknown incident.
-func (s *Store) Approve(incidentID, by string, now time.Time) (applied []types.UID, verdict v1.Verdict) {
+// Approve applies uid's pending approval of incidentID, and only that one: an
+// incident can span several workloads and each is approved on its own. The
+// verdict is applied, expired or superseded, or empty when uid has no such
+// approval and none is remembered.
+func (s *Store) Approve(incidentID string, uid types.UID, by string, now time.Time) v1.Verdict {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	expired := false
-	for uid, d := range s.data {
-		i := slices.IndexFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == incidentID })
-		if i < 0 {
-			continue
-		}
-		p := d.pending[i]
-		d.pending = slices.Delete(d.pending, i, i+1)
-		s.dirty[uid] = struct{}{}
-		if !p.Expires.After(now) {
-			expired = true
-			continue
-		}
-		p.Override.ApprovedBy = by
-		s.addOverrideLocked(uid, p.Override)
-		applied = append(applied, uid)
+	d := s.data[uid]
+	if d == nil {
+		return s.verdictFor(incidentID, uid)
 	}
-	slices.Sort(applied)
-	switch {
-	case len(applied) > 0:
-		return applied, v1.VerdictApplied
-	case expired:
-		s.tombstone(incidentID, v1.VerdictExpired)
-		return nil, v1.VerdictExpired
+	i := slices.IndexFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == incidentID })
+	if i < 0 {
+		return s.verdictFor(incidentID, uid)
 	}
-	return nil, s.verdictFor(incidentID)
+	p := d.pending[i]
+	d.pending = slices.Delete(d.pending, i, i+1)
+	s.dirty[uid] = struct{}{}
+	if !p.Expires.After(now) {
+		s.tombstone(incidentID, uid, v1.VerdictExpired)
+		return v1.VerdictExpired
+	}
+	p.Override.ApprovedBy = by
+	s.addOverrideLocked(uid, p.Override)
+	return v1.VerdictApplied
 }
 
-// Reject drops the pending approval of incidentID and returns the affected workloads.
-func (s *Store) Reject(incidentID, _ string) []types.UID {
+// Reject drops uid's pending approval of incidentID and reports whether there was one.
+func (s *Store) Reject(incidentID string, uid types.UID, _ string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var uids []types.UID
-	for uid, d := range s.data {
-		n := len(d.pending)
-		d.pending = slices.DeleteFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == incidentID })
-		if len(d.pending) != n {
-			uids = append(uids, uid)
-			s.dirty[uid] = struct{}{}
-		}
+	d := s.data[uid]
+	if d == nil {
+		return false
 	}
-	slices.Sort(uids)
-	return uids
+	n := len(d.pending)
+	d.pending = slices.DeleteFunc(d.pending, func(p v1.PendingApproval) bool { return p.IncidentID == incidentID })
+	if len(d.pending) == n {
+		return false
+	}
+	s.dirty[uid] = struct{}{}
+	return true
 }
 
 // Expire removes pending approvals past their expiry and overrides past their end.
@@ -226,7 +221,7 @@ func (s *Store) Expire(now time.Time) (expiredPending map[types.UID][]v1.Pending
 				return false
 			}
 			expiredPending[uid] = append(expiredPending[uid], p)
-			s.tombstone(p.IncidentID, v1.VerdictExpired)
+			s.tombstone(p.IncidentID, uid, v1.VerdictExpired)
 			return true
 		})
 		d.overrides = slices.DeleteFunc(d.overrides, func(o v1.Override) bool {

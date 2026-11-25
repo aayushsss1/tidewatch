@@ -814,6 +814,29 @@ var _ = Describe("Engine", func() {
 			Expect(annotationsOf("rej")).NotTo(HaveKey(v1.AnnoReject))
 		})
 
+		It("approves only the annotated workload of a multi-workload incident", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("mwa", 2)
+			newWorkload("mwb", 2)
+			for _, n := range []string{"mwa", "mwb"} {
+				Expect(store.AddPending(uidOf(n), pending(inc1, 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
+			}
+			annotate("mwa", v1.AnnoApprove, "inc-1@alice")
+			eng.Step(ctx)
+
+			Expect(statusOf("mwa").Overrides).To(HaveLen(1))
+			Expect(statusOf("mwa").PendingApprovals).To(BeEmpty())
+			Expect(statusOf("mwb").Overrides).To(BeEmpty())
+			Expect(statusOf("mwb").PendingApprovals).To(HaveLen(1))
+			Expect(replicasOf("mwb")).To(Equal(int32(2)))
+
+			annotate("mwb", v1.AnnoApprove, "inc-1@alice")
+			clk.Step(testStep)
+			eng.Step(ctx)
+			Expect(statusOf("mwb").Overrides).To(HaveLen(1))
+			Expect(replicasOf("mwb")).To(Equal(int32(6)))
+		})
+
 		It("ignores an approve annotation for an expired approval and records verdict expired", func() {
 			newPolicy(v1.ModeActive, nil)
 			newWorkload("expired", 2)
