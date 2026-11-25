@@ -60,6 +60,10 @@ func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	target := fs.String("target", "", "target URL, e.g. http://frontend.shop/work")
 	getPattern := patternFlags(fs)
+	spikeAt := fs.String("spike-at", "", "optional flash-sale spike start (RFC3339); empty disables the spike")
+	spikeMult := fs.Float64("spike-mult", 4, "spike multiplier on the base pattern")
+	spikeRamp := fs.Duration("spike-ramp", 2*time.Minute, "time to ramp linearly from 1x to the multiplier")
+	spikeDur := fs.Duration("spike-dur", 8*time.Minute, "time the full multiplier holds after the ramp")
 	_ = fs.Parse(args)
 	if *target == "" {
 		return fmt.Errorf("--target is required")
@@ -67,6 +71,13 @@ func runCmd(args []string) error {
 	p, err := getPattern()
 	if err != nil {
 		return err
+	}
+	if *spikeAt != "" {
+		at, err := time.Parse(time.RFC3339, *spikeAt)
+		if err != nil {
+			return fmt.Errorf("invalid --spike-at: %w", err)
+		}
+		p.SpikeAt, p.SpikeMult, p.SpikeRamp, p.SpikeDur = at, *spikeMult, *spikeRamp, *spikeDur
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
 	sem := make(chan struct{}, 4000)

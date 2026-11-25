@@ -51,9 +51,16 @@ type decision struct {
 	Verdict string    `json:"verdict"`
 }
 
+type override struct {
+	MinReplicas int32     `json:"minReplicas"`
+	Start       time.Time `json:"start"`
+	End         time.Time `json:"end"`
+}
+
 type tideWorkload struct {
 	Status struct {
 		Decisions []decision `json:"decisions"`
+		Overrides []override `json:"overrides"`
 	} `json:"status"`
 }
 
@@ -98,11 +105,12 @@ func promQuery(q string, at time.Time) (int, error) {
 	return len(resp.Data.Result), nil
 }
 
-var _ = Describe("demo act 1", Ordered, func() {
+var _ = Describe("demo", Ordered, func() {
 	var (
-		root  string
-		peak  time.Time
-		epoch time.Time
+		root    string
+		peak    time.Time
+		epoch   time.Time
+		spikeAt time.Time
 	)
 
 	BeforeAll(func() {
@@ -122,6 +130,8 @@ var _ = Describe("demo act 1", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		epoch, err = time.Parse(time.RFC3339, state["EPOCH"])
 		Expect(err).NotTo(HaveOccurred())
+		spikeAt, err = time.Parse(time.RFC3339, state["SPIKE_AT"])
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	AfterAll(func() {
@@ -133,6 +143,7 @@ var _ = Describe("demo act 1", Ordered, func() {
 		}
 	})
 
+	// Act 1.
 	It("prescales frontend before the peak without exceeding ready capacity", func() {
 		By("waiting for a baseline scale-up decision before the peak")
 		Eventually(func(g Gomega) {
@@ -161,6 +172,58 @@ var _ = Describe("demo act 1", Ordered, func() {
 			n, err := promQuery(q, peak)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(n).To(BeNumerically(">", 0), "capacity ratio reached >= 1.0 (or no series): "+q)
+		}, 2*time.Minute, 10*time.Second).Should(Succeed())
+	})
+
+	// Act 2 needs a paid LLM key: run it with `make demo-e2e-act2`.
+	It("agent prescales api and worker ahead of the flash-sale cascade", Label("act2"), func() {
+		if os.Getenv("ANTHROPIC_API_KEY") == "" {
+			Skip("Act 2 skipped: set ANTHROPIC_API_KEY to run the agent")
+		}
+		reach := spikeAt.Add(90 * time.Second) // the spike reaches api this long after frontend
+
+		By("waiting for an agent decision and an override that starts before the spike reaches api/worker")
+		seenOverride := false
+		Eventually(func(g Gomega) {
+			agentDecision := false
+			for _, name := range []string{"api-deploy", "worker-deploy"} {
+				out, err := kubectl("get", "tideworkload", name, "-n", "shop", "-o", "json")
+				g.Expect(err).NotTo(HaveOccurred())
+				var tw tideWorkload
+				g.Expect(json.Unmarshal([]byte(out), &tw)).To(Succeed())
+				for _, d := range tw.Status.Decisions {
+					if d.Source == "agent" {
+						agentDecision = true
+					}
+				}
+				for _, o := range tw.Status.Overrides {
+					if o.Start.Before(reach) {
+						seenOverride = true
+					}
+				}
+			}
+			g.Expect(agentDecision).To(BeTrue(), "no decision with source=agent on api-deploy or worker-deploy yet")
+			g.Expect(seenOverride).To(BeTrue(), "no override starting before %s yet", reach)
+		}, max(time.Until(spikeAt.Add(6*time.Minute)), time.Minute), 10*time.Second).Should(Succeed())
+
+		By("checking a TideEpisode exists in shop")
+		out, err := kubectl("get", "tideepisodes", "-n", "shop", "-o", "json")
+		Expect(err).NotTo(HaveOccurred())
+		var eps struct {
+			Items []json.RawMessage `json:"items"`
+		}
+		Expect(json.Unmarshal([]byte(out), &eps)).To(Succeed())
+		Expect(eps.Items).NotTo(BeEmpty(), "no TideEpisode in shop")
+
+		By("waiting for the spike to end, then checking the baseline alone would have lagged")
+		spikeEnd := spikeAt.Add(10 * time.Minute) // 2m ramp + 8m hold
+		time.Sleep(time.Until(spikeEnd))
+		q := `max_over_time((tidewatch_baseline_only_replicas{workload="api-deploy"} < ` +
+			`tidewatch_desired_replicas{workload="api-deploy"})[13m:15s])`
+		Eventually(func(g Gomega) {
+			n, err := promQuery(q, spikeEnd.Add(30*time.Second))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(n).To(BeNumerically(">", 0), "baseline_only never fell below desired for api-deploy: "+q)
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 	})
 })

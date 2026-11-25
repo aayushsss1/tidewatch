@@ -28,6 +28,10 @@ spec:
             - --noise=0.05
             - --seed=1
             - --epoch=${EPOCH}
+            - --spike-at=${SPIKE_AT}
+            - --spike-mult=4
+            - --spike-ramp=2m
+            - --spike-dur=8m
           resources:
             requests:
               cpu: 100m

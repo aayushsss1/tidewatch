@@ -1,0 +1,28 @@
+# Seeded for demo Act 2 so the agent's find_similar_episodes has something to retrieve.
+# hack/demo.sh fills the ${...} placeholders with sed.
+apiVersion: tidewatch.dev/v1alpha1
+kind: TideEpisode
+metadata:
+  name: flash-sale-previous
+  namespace: shop
+  labels:
+    tidewatch.dev/policy: ${POLICY_NS}.${POLICY_NAME}
+    tidewatch.dev/lead: frontend-deploy
+spec:
+  policyRef:
+    namespace: ${POLICY_NS}
+    name: ${POLICY_NAME}
+  lead: frontend-deploy
+  members:
+    - { workload: api-deploy, lagSeconds: 90 }
+    - { workload: worker-deploy, lagSeconds: 180 }
+  start: ${EP_START}
+  peakAt: ${EP_PEAK}
+  end: ${EP_END}
+  peakRatio: "4.5"
+  calendar:
+    weekday: ${WEEKDAY}
+    hour: ${HOUR}
+    timezone: UTC
+  source: manual
+  notes: "Previous flash sale: frontend peaked ~4.5×, api followed ~90s later, worker ~180s; prescaling api 8m early was timely"

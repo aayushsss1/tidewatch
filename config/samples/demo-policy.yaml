@@ -31,3 +31,6 @@ spec:
     maxTotalReplicas: 25
     scaleUp: { maxStep: 4, cooldown: 30s }
     scaleDown: { maxStep: 2, cooldown: 60s, stabilizationWindow: 2m }
+  # Act 2 (flash sale): hack/demo.sh enables the agent and adds the ops note when ANTHROPIC_API_KEY is set.
+  agent:
+    enabled: false

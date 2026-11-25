@@ -25,7 +25,89 @@ kubectl get deploy -n shop -w
 
 For the demo the operator serves `/metrics` over plain HTTP (`--metrics-secure=false`) so a stock ServiceMonitor can scrape it. Do not do that in production.
 
-Clean up with `make demo-down`. `make demo-e2e` runs the same demo and asserts the prescale (it takes about 15 to 20 minutes).
+Clean up with `make demo-down`. `make demo-e2e` runs the same demo and asserts the prescale, Act 1 only (it takes about 15 to 20 minutes).
+
+## Agent (M2)
+
+The baseline is a deterministic forecast-driven scaler, and it keeps running whether or not the agent exists. The agent is an optional layer on top: an LLM that wakes only when something looks off, investigates with read-only tools, and proposes a *temporary override* of the baseline. It is off by default (`spec.agent.enabled: false`, and the operator starts with `--llm-provider=none`).
+
+### What it does
+
+- **Triggers.** A workload raises a trigger when: the forecast breaches capacity (`ForecastBreach`), load looks anomalous (`Anomaly`), forecast models disagree (`ModelDisagreement`), the workload restarts or rolls out (`WorkloadChange`), the ops note or context says something is due (`ContextDue`), or it has been over-provisioned for a long time (`OverProvisioned`).
+- **Incidents.** Related triggers within a policy are grouped into one incident (for example frontend, api and worker moving together). If many workloads trigger at once the agent enters storm mode and investigates the storm once, instead of once per workload.
+- **Tools.** The agent can call `get_forecast`, `compare_forecasts`, `get_workload_state`, `get_events`, `get_rollout_history`, `get_decision_history`, `get_related_workloads`, `query_metrics`, `get_ops_notes` and `find_similar_episodes`, then `propose_scaling`. All of them are read-only except the proposal.
+- **Overrides.** A proposal is a `minReplicas` floor with a start and an end, stored in `TideWorkload.status.overrides`. The baseline and the enforcer still decide the final replica count, so every override is clamped by the same guardrails (`maxReplicas`, `maxStep`, cooldown, the namespace total).
+- **Approval.** `spec.agent.approval` is `Manual` or `Auto` (below).
+- **Episodes.** When an incident ends, the operator records it as a `TideEpisode` (the lead workload, lagging members, a 32-point load shape, peak ratio, calendar slot, action and outcome). The agent retrieves similar past episodes with `find_similar_episodes`. You can also write one by hand (`source: manual`).
+- **Context.** `spec.agent.context.notes` (and an optional ConfigMap) carry ops notes such as "flash sale at 14:00 UTC, expect ~4x on frontend".
+
+Configure it per policy:
+
+```yaml
+spec:
+  agent:
+    enabled: true
+    approval: Manual          # or Auto
+    context:
+      notes: "Flash sale at 2026-12-01T14:00:00Z UTC, expect ~4x on frontend"
+    redactEventMessages: false
+```
+
+and give the operator a provider and key:
+
+```sh
+kubectl -n tidewatch-system create secret generic tidewatch-llm --from-literal=apiKey=...
+# then add --llm-provider=anthropic (and optionally --llm-model) to the manager args
+```
+
+The key is read from the `TIDEWATCH_LLM_API_KEY` environment variable, which `config/manager/manager.yaml` maps from Secret `tidewatch-llm`, key `apiKey`. Without a key the agent stays disabled.
+
+### Manual vs Auto
+
+- **Manual** (default): a proposal waits in `status.pendingApprovals` until a human approves or rejects it, or it expires after `approvalTimeout` (default 10m). Nothing changes meanwhile.
+- **Auto**: a proposal above `minConfidence` (default 0.6) is applied immediately, after the guardrails. Set `notifyOnAuto` to be notified through the Slack webhook when that happens.
+
+Approve from the command line with the kubectl plugin:
+
+```sh
+make build-plugin          # builds bin/kubectl-tidewatch; put it on your PATH
+kubectl tidewatch pending -A
+kubectl tidewatch approve <incident-id> -n shop
+kubectl tidewatch reject  <incident-id> -n shop
+```
+
+### Safety guarantees
+
+- **Overrides only lift.** An override can raise the replica floor. It can never lower the baseline's number or scale a workload down.
+- **The baseline is never blocked.** If the agent is disabled, slow, wrong, out of budget, or the provider is down, the baseline keeps scaling exactly as it would without the agent.
+- **Guardrails still apply.** Overrides pass through the same `maxReplicas`, `maxStep`, cooldown and total-replica limits as baseline decisions.
+- **Budget.** The agent spends at most `--agent-token-budget-per-hour` LLM tokens per hour (default 200000), plus per-investigation limits (`maxToolCalls`, `investigationTimeout`).
+- **Circuit breaker.** Repeated provider failures open a breaker and the agent stops calling the provider until it recovers.
+- **Storm mode.** A burst of triggers is collapsed into a single investigation, so a cluster-wide event cannot fan out into many LLM calls.
+
+### What data is sent to the LLM provider
+
+Only what the tools return, and only when an investigation runs:
+
+- workload names and namespaces;
+- metric summaries and forecast numbers (peaks, intervals, accuracy, replica counts, resource requests and limits);
+- event messages, truncated; set `spec.agent.redactEventMessages: true` to redact them;
+- the text of your ops notes and any episode notes.
+
+Secrets and pod specs are never sent.
+
+### Running Act 2
+
+Act 2 of the demo is a flash sale. The ops note announces it, the traffic generator spikes the frontend to 4x at 14 minutes after the demo epoch, and `api` and `worker` follow with a delay. With an API key, the agent prescales `api` and `worker` ahead of the cascade, and the ghost metric `tidewatch_baseline_only_replicas` shows the baseline alone would have lagged.
+
+```sh
+export ANTHROPIC_API_KEY=...          # this makes paid LLM calls
+make demo-down demo-e2e-act2          # about 30 minutes; asserts the agent's override, an episode and the ghost metric
+```
+
+or `ANTHROPIC_API_KEY=... make demo` to run it without the assertions. `make demo` creates Secret `tidewatch-llm`, deploys with `--llm-provider=anthropic`, sets `agent.enabled: true` with `approval: Auto`, adds the ops note and seeds one hand-written `TideEpisode`. Without the key it prints `Act 2 skipped: set ANTHROPIC_API_KEY to run the agent` and Act 1 runs unchanged, with the same traffic shape. `make demo-e2e` runs Act 1 only (no key needed, and CI uses it).
+
+**Cost:** measured at the first live run; expected to be cents per demo. <!-- TODO: fill in the measured token count (tidewatch_agent_tokens_total) and cost after the first live Act 2 run. -->
 
 ## License
 

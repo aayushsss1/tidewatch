@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tidewatch demo, Act 1: kind + Prometheus + shop apps + seeded history + TidePolicy.
+# Tidewatch demo: kind + Prometheus + shop apps + seeded history + TidePolicy (Act 1), and, when
+# ANTHROPIC_API_KEY is set, the LLM agent prescaling ahead of a flash-sale spike (Act 2).
 # Idempotent: safe to re-run. Fails fast on the first error.
 set -euo pipefail
 
@@ -19,6 +20,11 @@ BASE=40
 AMP=260
 NOISE=0.05
 STATE_DIR="$ROOT/bin"
+POLICY_NS=tidewatch-system
+POLICY_NAME=shop
+# Act 2 runs only with a key. The key is never printed.
+ACT2=false
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then ACT2=true; fi
 
 step() { printf '\n==> [%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 k() { kubectl --context "$CTX" "$@"; }
@@ -65,9 +71,17 @@ make install deploy IMG="$OP_IMG"
 # Demo only: serve /metrics over plain HTTP so a vanilla ServiceMonitor can scrape it
 # (the kubebuilder default is HTTPS with TokenReview authn, which needs extra RBAC and TLS config).
 OP_DEPLOY=tidewatch-controller-manager
-k -n tidewatch-system patch deployment "$OP_DEPLOY" --type=json \
-  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--metrics-secure=false"},
-       {"op":"add","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
+PATCH='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--metrics-secure=false"},
+       {"op":"add","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}'
+if [ "$ACT2" = true ]; then
+  # Act 2: hand the key to the operator through Secret tidewatch-llm (mapped to TIDEWATCH_LLM_API_KEY).
+  # The key goes in over stdin so it never appears in a process listing or in this script's output.
+  printf '%s' "$ANTHROPIC_API_KEY" | k -n tidewatch-system create secret generic tidewatch-llm \
+    --from-file=apiKey=/dev/stdin --dry-run=client -o yaml | k apply -f - >/dev/null
+  PATCH="$PATCH"',
+       {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--llm-provider=anthropic"}'
+fi
+k -n tidewatch-system patch deployment "$OP_DEPLOY" --type=json -p "$PATCH]"
 k -n tidewatch-system rollout status "deployment/$OP_DEPLOY" --timeout=3m
 k apply -f demo/operator/servicemonitor.yaml
 
@@ -96,9 +110,16 @@ e = d.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
 print((e + d.timedelta(seconds=int(sys.argv[2]) // 2)).strftime("%Y-%m-%dT%H:%M:%SZ"))
 PY
 )"
-echo "EPOCH=$EPOCH PEAK=$PEAK"
+# Act 2 flash sale: 14 minutes after EPOCH, after Act 1's peak (EPOCH + 10m) has passed.
+SPIKE_AT="$(python3 - "$EPOCH" <<'PY'
+import sys, datetime as d
+e = d.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
+print((e + d.timedelta(minutes=14)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+echo "EPOCH=$EPOCH PEAK=$PEAK SPIKE_AT=$SPIKE_AT"
 mkdir -p "$STATE_DIR"
-printf 'EPOCH=%s\nPEAK=%s\n' "$EPOCH" "$PEAK" > "$STATE_DIR/demo-state.env"
+printf 'EPOCH=%s\nPEAK=%s\nSPIKE_AT=%s\n' "$EPOCH" "$PEAK" "$SPIKE_AT" > "$STATE_DIR/demo-state.env"
 
 # Free :9090 of a kubectl port-forward left by a previous run; refuse to touch anything else.
 if command -v lsof >/dev/null 2>&1; then
@@ -130,11 +151,35 @@ done
 cleanup; PF_PID=""
 
 step "7/9 start trafficgen run (same pattern and epoch)"
-sed "s|\${EPOCH}|$EPOCH|g" demo/manifests/trafficgen.yaml | k apply -f -
+# The spike flags are passed with or without a key, so the traffic shape is the same either way.
+sed -e "s|\${EPOCH}|$EPOCH|g" -e "s|\${SPIKE_AT}|$SPIKE_AT|g" demo/manifests/trafficgen.yaml | k apply -f -
 k -n shop rollout status deployment/trafficgen --timeout=2m
 
 step "8/9 apply the demo TidePolicy"
 k apply -f config/samples/demo-policy.yaml
+if [ "$ACT2" = true ]; then
+  step "8b/9 Act 2: enable the agent (approval Auto) and announce the flash sale"
+  NOTE="Flash sale at ${SPIKE_AT} UTC, expect ~4× on frontend"
+  PATCH_BODY="$(python3 - "$NOTE" <<'PY'
+import json, sys
+print(json.dumps({"spec": {"agent": {"enabled": True, "approval": "Auto", "context": {"notes": sys.argv[1]}}}}))
+PY
+)"
+  k -n "$POLICY_NS" patch tidepolicy "$POLICY_NAME" --type=merge -p "$PATCH_BODY"
+  # Seed one hand-written episode so retrieval has something to find.
+  read -r EP_START EP_PEAK EP_END WEEKDAY HOUR < <(python3 - "$SPIKE_AT" <<'PY'
+import sys, datetime as d
+t = d.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ") - d.timedelta(days=7)
+f = "%Y-%m-%dT%H:%M:%SZ"
+print(t.strftime(f), (t + d.timedelta(minutes=5)).strftime(f), (t + d.timedelta(minutes=12)).strftime(f), t.strftime("%a"), t.hour)
+PY
+)
+  sed -e "s|\${POLICY_NS}|$POLICY_NS|g" -e "s|\${POLICY_NAME}|$POLICY_NAME|g" \
+      -e "s|\${EP_START}|$EP_START|g" -e "s|\${EP_PEAK}|$EP_PEAK|g" -e "s|\${EP_END}|$EP_END|g" \
+      -e "s|\${WEEKDAY}|$WEEKDAY|g" -e "s|\${HOUR}|$HOUR|g" demo/manifests/episode-template.yaml | k apply -f -
+else
+  echo "Act 2 skipped: set ANTHROPIC_API_KEY to run the agent"
+fi
 
 step "9/9 up"
 cat <<MSG
