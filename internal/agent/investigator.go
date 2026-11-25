@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,6 +69,7 @@ const (
 	reasonWindowClamp   = "window_clamped"
 	reasonEnded         = "ended"
 	reasonInvalidWindow = "invalid_window"
+	reasonAllDropped    = "all_dropped"
 )
 
 // Investigator runs one LLM investigation per incident and routes the result.
@@ -252,9 +254,16 @@ func (iv *Investigator) investigate(ctx context.Context, inc *Incident, deadline
 		}
 		log.Error(err, "Provider error")
 		res.Reasons = []string{string(out.Exit)}
+		iv.hold(inc, snaps, res, now)
+		iv.notifier().Skipped(ctx, inc, string(out.Exit))
 		return res
-	case llm.ExitDeadline, llm.ExitCancelled:
+	case llm.ExitDeadline:
 		res.Reasons = []string{string(out.Exit)} // settle stays Release
+		iv.hold(inc, snaps, res, now)
+		iv.notifier().Skipped(ctx, inc, string(out.Exit))
+		return res
+	case llm.ExitCancelled: // shutting down: nothing worth recording
+		res.Reasons = []string{string(out.Exit)}
 		return res
 	}
 	if iv.Breaker != nil {
@@ -262,6 +271,7 @@ func (iv *Investigator) investigate(ctx context.Context, inc *Incident, deadline
 	}
 	if out.Final == nil {
 		res.Reasons = []string{string(out.Exit)}
+		iv.hold(inc, snaps, res, now)
 		return res
 	}
 	return iv.conclude(ctx, inc, pol, snaps, *out.Final, res, now)
@@ -277,9 +287,11 @@ func (iv *Investigator) conclude(
 	case perr != nil:
 		logf.FromContext(ctx).WithName("agent").Info("Invalid final call", "incident", inc.ID, "error", perr.Error())
 		res.Reasons = []string{reasonInvalid}
+		iv.hold(inc, snaps, res, now)
 		return res
 	case noAct != nil:
 		res.Reasons = []string{reasonNoAction}
+		iv.hold(inc, snaps, res, now)
 		return res
 	}
 
@@ -295,6 +307,9 @@ func (iv *Investigator) conclude(
 		return res
 	}
 	if len(valid) == 0 {
+		held := res
+		held.Reasons = append(slices.Clone(reasons), reasonAllDropped)
+		iv.hold(inc, snaps, held, now)
 		return res
 	}
 	for _, uid := range sortedUIDs(valid) {
@@ -305,9 +320,32 @@ func (iv *Investigator) conclude(
 	}
 	res.Verdict = iv.route(ctx, inc, pol, *prop, valid,
 		decisionInfo{incident: inc.ID, reasons: reasons, trace: res.Trace, now: now})
+	if res.Verdict == "" { // nothing was stored
+		iv.hold(inc, snaps, res, now)
+	}
 	logf.FromContext(ctx).WithName("agent").Info("Investigation routed", "incident", inc.ID, "verdict", res.Verdict,
 		"provider", iv.Provider.Name(), "model", iv.Provider.Model(), "promptVersion", PromptVersion, "overrides", len(valid))
 	return res
+}
+
+// hold leaves an audit trail when an investigation ends without a stored
+// override: one "held" decision on the lead member carrying res.Reasons.
+func (iv *Investigator) hold(inc *Incident, snaps map[types.UID]engine.Snapshot, res Result, now time.Time) {
+	if iv.Store == nil {
+		return
+	}
+	lead := inc.Lead
+	if inc.Members[lead] == nil {
+		if len(inc.Members) == 0 {
+			return
+		}
+		lead = sortedUIDs(inc.Members)[0]
+	}
+	iv.Store.AddDecision(lead, v1.Decision{
+		Time: metav1.NewTime(now), Source: v1.SourceAgent, Final: snaps[lead].Replicas, Verdict: v1.VerdictHeld,
+		Reasons: slices.Clone(res.Reasons), IncidentID: inc.ID, PromptVersion: res.PromptVersion,
+		Provider: res.Provider, Model: res.Model, Trace: slices.Clone(res.Trace),
+	})
 }
 
 // scopeOf is what the incident's tools may touch.

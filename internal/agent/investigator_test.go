@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -690,5 +692,97 @@ func TestInvestigator_SupersededPendingBecomesDecision(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no superseded decision for the replaced pending approval")
+	}
+}
+
+func (f *fixture) heldDecision(name string) (v1.Decision, bool) {
+	for _, d := range f.store.TakeDecisions(f.uids[name]) {
+		if d.Verdict == v1.VerdictHeld && d.Source == v1.SourceAgent {
+			return d, true
+		}
+	}
+	return v1.Decision{}, false
+}
+
+func TestInvestigator_AllDroppedLeavesHeldDecisionOnLead(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Auto", "frontend-held")
+	f.propose(0.9, ovIn{Workload: "checkout-deploy", MinReplicas: 1000}) // out of scope: dropped
+
+	res := f.iv.Investigate(f.ctx, f.incident("frontend-held"), f.deadline())
+	if len(res.Overrides) != 0 {
+		t.Fatalf("overrides = %+v", res.Overrides)
+	}
+	// The engine writes the queued decision to the lead's status.
+	f.clk.Step(time.Minute)
+	f.eng.Step(f.ctx)
+	var tw v1.TideWorkload
+	if err := f.c.Get(f.ctx, types.NamespacedName{Namespace: testNS, Name: "frontend-held"}, &tw); err != nil {
+		t.Fatal(err)
+	}
+	var d *v1.Decision
+	for i := range tw.Status.Decisions {
+		if tw.Status.Decisions[i].Verdict == v1.VerdictHeld && tw.Status.Decisions[i].Source == v1.SourceAgent {
+			d = &tw.Status.Decisions[i]
+		}
+	}
+	if d == nil {
+		t.Fatalf("no held decision in status: %+v", tw.Status.Decisions)
+	}
+	if d.Source != v1.SourceAgent || d.IncidentID != testInc || !slices.Contains(d.Reasons, "out_of_scope") ||
+		d.Provider != "scripted" || d.Model != "scripted-1" || d.PromptVersion != PromptVersion {
+		t.Errorf("decision = %+v", d)
+	}
+}
+
+func TestInvestigator_NoActionAndFailedExitsLeaveHeldDecision(t *testing.T) {
+	cases := map[string]struct {
+		setup  func(f *fixture)
+		reason string
+		skip   bool
+	}{
+		"no_action": {func(f *fixture) { f.script("no_action", map[string]any{kReason: "weak", kConf: 0.9}, 100) }, reasonNoAction, false},
+		"provider_error": {func(f *fixture) {
+			f.prov.Errs = []error{errors.New("boom")}
+		}, "provider_error", true},
+		"no_tool_call": {func(f *fixture) {
+			f.prov.Turns = []llm.TurnResponse{{Message: llm.Message{Role: llm.RoleAssistant, Text: "hm"}}}
+		}, "no_tool_call", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			wl := "frontend-x-" + strings.ReplaceAll(name, "_", "-")
+			f := newFixture(t, v1.ModeActive, "Auto", wl)
+			tc.setup(f)
+			f.iv.Investigate(f.ctx, f.incident(wl), f.deadline())
+			d, ok := f.heldDecision(wl)
+			if !ok || !slices.Contains(d.Reasons, tc.reason) || d.PromptVersion != PromptVersion {
+				t.Fatalf("held decision = %+v ok=%v", d, ok)
+			}
+			if got := slices.Contains(f.notif.skipped, tc.reason); got != tc.skip {
+				t.Errorf("InvestigationSkipped(%s) = %v, want %v (%v)", tc.reason, got, tc.skip, f.notif.skipped)
+			}
+		})
+	}
+}
+
+func TestInvestigator_DeadlineLeavesHeldDecisionAndSkippedEvent(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Auto", "frontend-dl")
+	f.prov.Delay = 5 * time.Second
+	f.propose(0.9, ovIn{Workload: "frontend-dl", MinReplicas: 9})
+	var pol v1.TidePolicy
+	if err := f.c.Get(f.ctx, types.NamespacedName{Namespace: testNS, Name: f.pol}, &pol); err != nil {
+		t.Fatal(err)
+	}
+	pol.Spec.Agent.InvestigationTimeout = metav1.Duration{Duration: 50 * time.Millisecond}
+	if err := f.c.Update(f.ctx, &pol); err != nil {
+		t.Fatal(err)
+	}
+	res := f.iv.Investigate(f.ctx, f.incident("frontend-dl"), f.deadline())
+	if res.Exit != llm.ExitDeadline {
+		t.Fatalf("exit = %s", res.Exit)
+	}
+	d, ok := f.heldDecision("frontend-dl")
+	if !ok || !slices.Contains(d.Reasons, "deadline") || !slices.Contains(f.notif.skipped, "deadline") {
+		t.Fatalf("held=%+v ok=%v skipped=%v", d, ok, f.notif.skipped)
 	}
 }
