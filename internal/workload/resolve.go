@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -34,10 +36,20 @@ type Resolver struct {
 	// ScaleSupport is the scale-subresource discovery check. Nil means every
 	// kind is assumed to support scale.
 	ScaleSupport ScaleSupport
-	// Skipped holds, per policy, messages about selected kinds that were
-	// skipped for lacking a scale subresource. It is reset by each ResolveAll
-	// and is meant to feed a policy condition message.
-	Skipped map[v1.PolicyRef][]string
+}
+
+// Resolution is the outcome of ResolveAll. Issues holds, per policy, messages
+// about selectors, kinds or namespaces that were skipped; they are meant to
+// feed a policy condition message.
+type Resolution struct {
+	Targets map[v1.PolicyRef][]Target
+	Issues  map[v1.PolicyRef][]string
+}
+
+// skippable reports whether a list error means "this kind/namespace is
+// unavailable" rather than something unexpected.
+func skippable(err error) bool {
+	return meta.IsNoMatchError(err) || apierrors.IsNotFound(err) || apierrors.IsForbidden(err)
 }
 
 // NewDiscoveryScaleSupport builds a ScaleSupport backed by API discovery,
@@ -70,8 +82,8 @@ func NewDiscoveryScaleSupport(dc discovery.DiscoveryInterface) ScaleSupport {
 type targetKey struct{ apiVersion, kind, namespace, name string }
 
 // ResolveAll resolves every policy at once so multi-policy conflicts are visible.
-func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (map[v1.PolicyRef][]Target, error) {
-	r.Skipped = map[v1.PolicyRef][]string{}
+func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (Resolution, error) {
+	issues := map[v1.PolicyRef][]string{}
 	out := make(map[v1.PolicyRef][]Target, len(policies))
 	owners := map[targetKey][]v1.PolicyRef{}
 
@@ -80,18 +92,23 @@ func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (ma
 		ref := v1.PolicyRef{Namespace: p.Namespace, Name: p.Name}
 		out[ref] = nil
 
-		namespaces, err := r.namespaces(ctx, p)
+		namespaces, nsIssues, err := r.namespaces(ctx, p)
+		issues[ref] = append(issues[ref], nsIssues...)
 		if err != nil {
-			return nil, err
+			return Resolution{}, err
+		}
+		if namespaces == nil { // invalid namespaceSelector: policy gets no targets
+			continue
 		}
 		sel, err := metav1.LabelSelectorAsSelector(&p.Spec.Selector.LabelSelector)
 		if err != nil {
-			return nil, fmt.Errorf("policy %s/%s: invalid selector: %w", p.Namespace, p.Name, err)
+			issues[ref] = append(issues[ref], fmt.Sprintf("invalid selector: %v", err))
+			continue
 		}
 		for _, kind := range p.Spec.Selector.Kinds {
 			gvk := schema.FromAPIVersionAndKind(kind.APIVersion, kind.Kind)
 			if r.ScaleSupport != nil && !r.ScaleSupport(gvk) {
-				r.Skipped[ref] = append(r.Skipped[ref],
+				issues[ref] = append(issues[ref],
 					fmt.Sprintf("kind %s/%s skipped: no scale subresource", kind.APIVersion, kind.Kind))
 				continue
 			}
@@ -99,7 +116,12 @@ func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (ma
 				list := &unstructured.UnstructuredList{}
 				list.SetGroupVersionKind(gvk.GroupVersion().WithKind(gvk.Kind + "List"))
 				if err := r.Client.List(ctx, list, client.InNamespace(ns), client.MatchingLabelsSelector{Selector: sel}); err != nil {
-					return nil, fmt.Errorf("list %s in %s: %w", kind.Kind, ns, err)
+					if skippable(err) {
+						issues[ref] = append(issues[ref],
+							fmt.Sprintf("kind %s/%s skipped: %v", kind.APIVersion, kind.Kind, err))
+						break // the kind is unavailable in every namespace
+					}
+					return Resolution{}, fmt.Errorf("list %s in %s: %w", kind.Kind, ns, err)
 				}
 				for j := range list.Items {
 					obj := &list.Items[j]
@@ -116,11 +138,17 @@ func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (ma
 		}
 	}
 
-	hpas, err := r.hpaTargets(ctx, out)
-	if err != nil {
-		return nil, err
-	}
+	hpas, hpaFailed := r.hpaTargets(ctx, out)
 	for ref, ts := range out {
+		failedNS := map[string]struct{}{}
+		for i := range ts {
+			if msg, bad := hpaFailed[ts[i].Namespace]; bad {
+				if _, seen := failedNS[ts[i].Namespace]; !seen {
+					failedNS[ts[i].Namespace] = struct{}{}
+					issues[ref] = append(issues[ref], msg)
+				}
+			}
+		}
 		for i := range ts {
 			t := &ts[i]
 			k := targetKey{t.Ref.APIVersion, t.Ref.Kind, t.Namespace, t.Ref.Name}
@@ -137,16 +165,18 @@ func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (ma
 		}
 		out[ref] = ts
 	}
-	return out, nil
+	return Resolution{Targets: out, Issues: issues}, nil
 }
 
 // namespaces returns the union of listed and selected namespaces, or the
-// policy's own namespace when neither is set.
-func (r *Resolver) namespaces(ctx context.Context, p *v1.TidePolicy) ([]string, error) {
+// policy's own namespace when neither is set. A nil result with a nil error
+// means the policy's namespaceSelector is invalid (recorded in issues).
+func (r *Resolver) namespaces(ctx context.Context, p *v1.TidePolicy) ([]string, []string, error) {
 	s := p.Spec.Selector
 	if len(s.Namespaces) == 0 && s.NamespaceSelector == nil {
-		return []string{p.Namespace}, nil
+		return []string{p.Namespace}, nil, nil
 	}
+	var issues []string
 	set := map[string]struct{}{}
 	for _, n := range s.Namespaces {
 		set[n] = struct{}{}
@@ -154,11 +184,14 @@ func (r *Resolver) namespaces(ctx context.Context, p *v1.TidePolicy) ([]string, 
 	if s.NamespaceSelector != nil {
 		sel, err := metav1.LabelSelectorAsSelector(s.NamespaceSelector)
 		if err != nil {
-			return nil, fmt.Errorf("policy %s/%s: invalid namespaceSelector: %w", p.Namespace, p.Name, err)
+			return nil, []string{fmt.Sprintf("invalid namespaceSelector: %v", err)}, nil
 		}
 		var nsList corev1.NamespaceList
 		if err := r.Client.List(ctx, &nsList, client.MatchingLabelsSelector{Selector: sel}); err != nil {
-			return nil, fmt.Errorf("list namespaces: %w", err)
+			if !skippable(err) {
+				return nil, nil, fmt.Errorf("list namespaces: %w", err)
+			}
+			issues = append(issues, fmt.Sprintf("namespaceSelector not evaluated: %v", err))
 		}
 		for _, n := range nsList.Items {
 			set[n.Name] = struct{}{}
@@ -169,12 +202,14 @@ func (r *Resolver) namespaces(ctx context.Context, p *v1.TidePolicy) ([]string, 
 		out = append(out, n)
 	}
 	slices.Sort(out)
-	return out, nil
+	return out, issues, nil
 }
 
 // hpaTargets maps each target key that an autoscaling/v2 HPA points at to the
-// HPA name, looking only in namespaces that contain resolved targets.
-func (r *Resolver) hpaTargets(ctx context.Context, resolved map[v1.PolicyRef][]Target) (map[targetKey]string, error) {
+// HPA name, looking only in namespaces that contain resolved targets. Namespaces
+// whose HPA list failed are returned with a message; their targets simply get no
+// HPA conflict data.
+func (r *Resolver) hpaTargets(ctx context.Context, resolved map[v1.PolicyRef][]Target) (map[targetKey]string, map[string]string) {
 	nss := map[string]struct{}{}
 	for _, ts := range resolved {
 		for _, t := range ts {
@@ -182,11 +217,13 @@ func (r *Resolver) hpaTargets(ctx context.Context, resolved map[v1.PolicyRef][]T
 		}
 	}
 	out := map[targetKey]string{}
+	failed := map[string]string{}
 	for ns := range nss {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(schema.GroupVersionKind{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscalerList"})
 		if err := r.Client.List(ctx, list, client.InNamespace(ns)); err != nil {
-			return nil, fmt.Errorf("list hpas in %s: %w", ns, err)
+			failed[ns] = fmt.Sprintf("hpa conflict detection unavailable in namespace %s: %v", ns, err)
+			continue
 		}
 		for _, h := range list.Items {
 			m, found, _ := unstructured.NestedStringMap(h.Object, "spec", "scaleTargetRef")
@@ -207,7 +244,7 @@ func (r *Resolver) hpaTargets(ctx context.Context, resolved map[v1.PolicyRef][]T
 			}
 		}
 	}
-	return res, nil
+	return res, failed
 }
 
 func targetKeyByGroup(group, kind, ns, name string) targetKey {
