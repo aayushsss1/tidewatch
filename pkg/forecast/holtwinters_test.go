@@ -154,3 +154,19 @@ func TestHoltWinters_IntervalCoverageWithMinimalHistory(t *testing.T) {
 		t.Errorf("coverage = %.2f, want >= 0.70", frac)
 	}
 }
+
+func TestHoltWinters_HalfWidthReflectsNoiseWithMinimalHistory(t *testing.T) {
+	const sigmaTrue = 5.0
+	rng := rand.New(rand.NewPCG(7, 9))
+	s := hwSeries(48, func(i int) float64 { return sineAt(i) + rng.NormFloat64()*sigmaTrue })
+	f, err := NewHoltWinters(HoltWintersOptions{}).Forecast(context.Background(), s, hwSeason, hwSeason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	half := f.Points[0].Upper - f.Points[0].Point
+	ratio := half / (z90 * sigmaTrue)
+	t.Logf("ratio = %.3f", ratio)
+	if ratio < 0.8 || ratio > 1.5 {
+		t.Errorf("h=1 half-width = %.3f (%.2fx of 1.645*sigma_true), want within [0.8, 1.5]x", half, ratio)
+	}
+}
