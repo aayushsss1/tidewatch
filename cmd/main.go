@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -27,6 +28,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -37,6 +39,8 @@ import (
 
 	tidewatchv1alpha1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 	"github.com/aayushsss1/tidewatch/internal/controller"
+	"github.com/aayushsss1/tidewatch/internal/engine"
+	"github.com/aayushsss1/tidewatch/internal/workload"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -63,6 +67,9 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var workers int
+	var dryRun bool
+	var defaultTimeToReady time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -82,6 +89,10 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.IntVar(&workers, "workers", 8, "Number of parallel workers the engine uses to evaluate workloads.")
+	flag.BoolVar(&dryRun, "dry-run", false, "If set, the engine never writes to the scale subresource.")
+	flag.DurationVar(&defaultTimeToReady, "default-time-to-ready", 60*time.Second,
+		"Time-to-ready assumed for a workload until enough pod startups have been observed.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -182,11 +193,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	dc, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create discovery client")
+		os.Exit(1)
+	}
 	if err := (&controller.TidePolicyReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		ScaleSupport: workload.NewDiscoveryScaleSupport(dc),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "tidepolicy")
+		os.Exit(1)
+	}
+	if err := mgr.Add(engine.New(mgr.GetClient(), engine.Options{
+		Workers:            workers,
+		DryRun:             dryRun,
+		DefaultTimeToReady: defaultTimeToReady,
+	})); err != nil {
+		setupLog.Error(err, "Failed to add engine")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

@@ -34,7 +34,7 @@ func minimalPolicy(name string) *tidewatchv1alpha1.TidePolicy {
 		Spec: tidewatchv1alpha1.TidePolicySpec{
 			Prometheus: tidewatchv1alpha1.PrometheusSpec{URL: "http://prometheus.monitoring.svc:9090"},
 			Selector: tidewatchv1alpha1.WorkloadSelector{
-				Kinds: []tidewatchv1alpha1.TargetKind{{APIVersion: "apps/v1", Kind: "Deployment"}},
+				Kinds: []tidewatchv1alpha1.TargetKind{{APIVersion: appsAPIVersion, Kind: deploymentKind}},
 			},
 			Load: tidewatchv1alpha1.LoadSpec{
 				DefaultProfile: "http",
