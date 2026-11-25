@@ -52,9 +52,6 @@ func (f Forecast) MaxUpper(until time.Time) (float64, bool) {
 // ErrInsufficientHistory is returned when a series is too short for a model.
 var ErrInsufficientHistory = errors.New("insufficient history")
 
-// ErrModelFailed is returned when a model produces NaN or Inf values.
-var ErrModelFailed = errors.New("model failed")
-
 // Forecaster produces a forecast from a series.
 type Forecaster interface {
 	Name() string
