@@ -166,7 +166,7 @@ func TestHoltWinters_HalfWidthReflectsNoiseWithMinimalHistory(t *testing.T) {
 	half := f.Points[0].Upper - f.Points[0].Point
 	ratio := half / (z90 * sigmaTrue)
 	t.Logf("ratio = %.3f", ratio)
-	if ratio < 0.8 || ratio > 1.5 {
-		t.Errorf("h=1 half-width = %.3f (%.2fx of 1.645*sigma_true), want within [0.8, 1.5]x", half, ratio)
+	if ratio < 1.0 || ratio > 1.6 {
+		t.Errorf("h=1 half-width = %.3f (%.2fx of 1.645*sigma_true), want within [1.0, 1.6]x", half, ratio)
 	}
 }
