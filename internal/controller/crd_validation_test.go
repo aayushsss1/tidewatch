@@ -28,9 +28,11 @@ import (
 	tidewatchv1alpha1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 )
 
+const defaultNS = "default"
+
 func minimalPolicy(name string) *tidewatchv1alpha1.TidePolicy {
 	return &tidewatchv1alpha1.TidePolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS},
 		Spec: tidewatchv1alpha1.TidePolicySpec{
 			Prometheus: tidewatchv1alpha1.PrometheusSpec{URL: "http://prometheus.monitoring.svc:9090"},
 			Selector: tidewatchv1alpha1.WorkloadSelector{
@@ -43,6 +45,23 @@ func minimalPolicy(name string) *tidewatchv1alpha1.TidePolicy {
 				},
 			},
 			Guardrails: tidewatchv1alpha1.GuardrailsSpec{MaxReplicas: 5},
+		},
+	}
+}
+
+func minimalEpisode(name string) *tidewatchv1alpha1.TideEpisode {
+	now := metav1.Now()
+	return &tidewatchv1alpha1.TideEpisode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS},
+		Spec: tidewatchv1alpha1.TideEpisodeSpec{
+			PolicyRef: tidewatchv1alpha1.PolicyRef{Namespace: defaultNS, Name: "p"},
+			Lead:      "web",
+			Start:     now,
+			PeakAt:    now,
+			End:       now,
+			PeakRatio: "4.8",
+			Source:    "manual",
+			Notes:     "hand-entered incident",
 		},
 	}
 }
@@ -110,5 +129,37 @@ var _ = Describe("CRD validation", func() {
 		Expect(k8sClient.Create(ctx, p)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(p), p)).To(Succeed())
 		Expect(p.Spec.Guardrails.MinReplicas).To(HaveValue(Equal(int32(0))))
+	})
+	It("defaults the agent spec", func() {
+		p := minimalPolicy("agent-defaults")
+		Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(p), p)).To(Succeed())
+		a := p.Spec.Agent
+		Expect(a.Enabled).To(BeFalse())
+		Expect(a.Approval).To(Equal("Manual"))
+		Expect(a.ApprovalTimeout.Duration).To(Equal(10 * time.Minute))
+		Expect(a.MinConfidence).To(Equal("0.6"))
+		Expect(a.MaxToolCalls).To(Equal(int32(8)))
+		Expect(a.InvestigationTimeout.Duration).To(Equal(60 * time.Second))
+	})
+	It("rejects approval outside the enum", func() {
+		p := minimalPolicy("bad-approval")
+		p.Spec.Agent.Approval = "Sometimes"
+		err := k8sClient.Create(ctx, p)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("approval"))
+	})
+	It("rejects a manual TideEpisode with 31 shape points", func() {
+		e := minimalEpisode("bad-shape")
+		for range 31 {
+			e.Spec.Shape = append(e.Spec.Shape, "1.0")
+		}
+		err := k8sClient.Create(ctx, e)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("shape"))
+	})
+	It("accepts a manual TideEpisode without shape", func() {
+		e := minimalEpisode("no-shape")
+		Expect(k8sClient.Create(ctx, e)).To(Succeed())
 	})
 })

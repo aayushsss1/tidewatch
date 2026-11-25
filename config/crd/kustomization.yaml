@@ -4,6 +4,7 @@
 resources:
 - bases/tidewatch.dev_tidepolicies.yaml
 - bases/tidewatch.dev_tideworkloads.yaml
+- bases/tidewatch.dev_tideepisodes.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

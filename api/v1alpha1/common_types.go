@@ -61,6 +61,8 @@ type DecisionSource string
 const (
 	// SourceBaseline is the deterministic forecast-driven baseline.
 	SourceBaseline DecisionSource = "baseline"
+	// SourceAgent is an override proposed by the AI agent.
+	SourceAgent DecisionSource = "agent"
 )
 
 // Verdict is the enforcer's outcome for a decision.
@@ -72,6 +74,12 @@ const (
 	VerdictShadow   Verdict = "shadow"
 	VerdictHeld     Verdict = "held"
 	VerdictRejected Verdict = "rejected"
+	// VerdictPending awaits human approval.
+	VerdictPending Verdict = "pending"
+	// VerdictExpired means a pending approval timed out.
+	VerdictExpired Verdict = "expired"
+	// VerdictSuperseded means a newer proposal replaced this one.
+	VerdictSuperseded Verdict = "superseded"
 )
 
 // Decision records one scaling decision and what the enforcer did with it.
@@ -87,6 +95,81 @@ type Decision struct {
 	// external_change, metrics_unavailable.
 	// +optional
 	Reasons []string `json:"reasons,omitempty"`
+	// +optional
+	IncidentID string `json:"incidentId,omitempty"`
+	// +optional
+	PromptVersion string `json:"promptVersion,omitempty"`
+	// +optional
+	Provider string `json:"provider,omitempty"`
+	// +optional
+	Model string `json:"model,omitempty"`
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Trace []TraceEntry `json:"trace,omitempty"`
+	// +optional
+	Outcome *Outcome `json:"outcome,omitempty"`
+}
+
+// TraceEntry records one agent tool call.
+type TraceEntry struct {
+	Tool string `json:"tool"`
+	// +kubebuilder:validation:MaxLength=200
+	// +optional
+	Args string `json:"args,omitempty"`
+	// +optional
+	ResultBytes int32 `json:"resultBytes,omitempty"`
+	// +optional
+	LatencyMs int32 `json:"latencyMs,omitempty"`
+}
+
+// Outcome is the retrospective score of an agent decision.
+type Outcome struct {
+	// Timely is nil until it can be judged.
+	// +optional
+	Timely *bool `json:"timely,omitempty"`
+	// +optional
+	Needed bool `json:"needed,omitempty"`
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+	// +optional
+	WastedReplicaMinutes string      `json:"wastedReplicaMinutes,omitempty"`
+	ScoredAt             metav1.Time `json:"scoredAt"`
+}
+
+// Override is a time-boxed minimum replica floor.
+type Override struct {
+	ID          string      `json:"id"`
+	IncidentID  string      `json:"incidentId"`
+	MinReplicas int32       `json:"minReplicas"`
+	Start       metav1.Time `json:"start"`
+	End         metav1.Time `json:"end"`
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// +optional
+	ApprovedBy string `json:"approvedBy,omitempty"`
+}
+
+// PendingApproval is an agent proposal awaiting a human.
+type PendingApproval struct {
+	IncidentID string   `json:"incidentId"`
+	Override   Override `json:"override"`
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+	Confidence string `json:"confidence"`
+	// +optional
+	Reason  string      `json:"reason,omitempty"`
+	Expires metav1.Time `json:"expires"`
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Trace []TraceEntry `json:"trace,omitempty"`
+}
+
+// RecentOutcome summarizes a past agent proposal and how it turned out.
+type RecentOutcome struct {
+	IncidentID  string      `json:"incidentId"`
+	Time        metav1.Time `json:"time"`
+	Verdict     Verdict     `json:"verdict"`
+	MinReplicas int32       `json:"minReplicas"`
+	// +optional
+	Outcome *Outcome `json:"outcome,omitempty"`
 }
 
 // Condition types and annotation/label keys.
@@ -97,12 +180,16 @@ const (
 	CondBudgetLimited      = "BudgetLimited"
 	CondAnnotationsIgnored = "AnnotationsIgnored"
 	CondReady              = "Ready"
+	CondAgentAvailable     = "AgentAvailable"
 
 	AnnoPaused       = "tidewatch.dev/paused"
 	AnnoMinReplicas  = "tidewatch.dev/min-replicas"
 	AnnoMaxReplicas  = "tidewatch.dev/max-replicas"
 	AnnoTargetPerRep = "tidewatch.dev/target-per-replica"
 	AnnoLoadProfile  = "tidewatch.dev/load-profile"
+	AnnoPriority     = "tidewatch.dev/priority"
+	AnnoApprove      = "tidewatch.dev/approve"
+	AnnoReject       = "tidewatch.dev/reject"
 	// LabelPolicy is set on TideWorkloads; its value is "<ns>.<name>".
 	LabelPolicy = "tidewatch.dev/policy"
 )

@@ -2,4 +2,5 @@
 resources:
 - tidewatch_v1alpha1_tidepolicy.yaml
 - tidewatch_v1alpha1_tideworkload.yaml
+- tidewatch_v1alpha1_tideepisode.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

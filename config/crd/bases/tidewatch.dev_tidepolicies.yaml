@@ -49,6 +49,59 @@ spec:
           spec:
             description: TidePolicySpec defines the desired state of TidePolicy
             properties:
+              agent:
+                default: {}
+                description: AgentSpec configures the AI agent layer.
+                properties:
+                  approval:
+                    default: Manual
+                    enum:
+                    - Manual
+                    - Auto
+                    type: string
+                  approvalTimeout:
+                    default: 10m
+                    type: string
+                  context:
+                    default: {}
+                    description: AgentContext is operator-supplied background for
+                      the agent.
+                    properties:
+                      configMapRef:
+                        description: LocalObjectRef names an object in the policy's
+                          namespace.
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      notes:
+                        maxLength: 2048
+                        type: string
+                    type: object
+                  enabled:
+                    default: false
+                    type: boolean
+                  investigationTimeout:
+                    default: 60s
+                    type: string
+                  maxToolCalls:
+                    default: 8
+                    format: int32
+                    maximum: 20
+                    minimum: 1
+                    type: integer
+                  minConfidence:
+                    default: "0.6"
+                    pattern: ^[0-9]+(\.[0-9]+)?$
+                    type: string
+                  notifyOnAuto:
+                    type: boolean
+                  redactEventMessages:
+                    type: boolean
+                type: object
               forecasting:
                 default: {}
                 description: ForecastingSpec configures forecasting.

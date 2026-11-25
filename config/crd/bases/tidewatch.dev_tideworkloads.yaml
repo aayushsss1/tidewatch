@@ -36,6 +36,10 @@ spec:
     - jsonPath: .status.mode
       name: Mode
       type: string
+    - jsonPath: .status.overrides[*].minReplicas
+      name: Overrides
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -119,6 +123,9 @@ spec:
                   - model
                   type: object
                 type: array
+              baselineReplicas:
+                format: int32
+                type: integer
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -195,6 +202,32 @@ spec:
                       description: Final is the replica count after enforcement.
                       format: int32
                       type: integer
+                    incidentId:
+                      type: string
+                    model:
+                      type: string
+                    outcome:
+                      description: Outcome is the retrospective score of an agent
+                        decision.
+                      properties:
+                        needed:
+                          type: boolean
+                        scoredAt:
+                          format: date-time
+                          type: string
+                        timely:
+                          description: Timely is nil until it can be judged.
+                          type: boolean
+                        wastedReplicaMinutes:
+                          pattern: ^[0-9]+(\.[0-9]+)?$
+                          type: string
+                      required:
+                      - scoredAt
+                      type: object
+                    promptVersion:
+                      type: string
+                    provider:
+                      type: string
                     reasons:
                       description: |-
                         Reasons lists enforcement reasons, e.g. max_step, cooldown, budget,
@@ -209,6 +242,26 @@ spec:
                     time:
                       format: date-time
                       type: string
+                    trace:
+                      items:
+                        description: TraceEntry records one agent tool call.
+                        properties:
+                          args:
+                            maxLength: 200
+                            type: string
+                          latencyMs:
+                            format: int32
+                            type: integer
+                          resultBytes:
+                            format: int32
+                            type: integer
+                          tool:
+                            type: string
+                        required:
+                        - tool
+                        type: object
+                      maxItems: 8
+                      type: array
                     verdict:
                       description: Verdict is the enforcer's outcome for a decision.
                       type: string
@@ -268,12 +321,153 @@ spec:
                 - Shadow
                 - Active
                 type: string
+              overrides:
+                items:
+                  description: Override is a time-boxed minimum replica floor.
+                  properties:
+                    approvedBy:
+                      type: string
+                    end:
+                      format: date-time
+                      type: string
+                    id:
+                      type: string
+                    incidentId:
+                      type: string
+                    minReplicas:
+                      format: int32
+                      type: integer
+                    reason:
+                      type: string
+                    start:
+                      format: date-time
+                      type: string
+                  required:
+                  - end
+                  - id
+                  - incidentId
+                  - minReplicas
+                  - start
+                  type: object
+                maxItems: 3
+                type: array
               peakTime:
                 format: date-time
                 type: string
+              pendingApprovals:
+                items:
+                  description: PendingApproval is an agent proposal awaiting a human.
+                  properties:
+                    confidence:
+                      pattern: ^[0-9]+(\.[0-9]+)?$
+                      type: string
+                    expires:
+                      format: date-time
+                      type: string
+                    incidentId:
+                      type: string
+                    override:
+                      description: Override is a time-boxed minimum replica floor.
+                      properties:
+                        approvedBy:
+                          type: string
+                        end:
+                          format: date-time
+                          type: string
+                        id:
+                          type: string
+                        incidentId:
+                          type: string
+                        minReplicas:
+                          format: int32
+                          type: integer
+                        reason:
+                          type: string
+                        start:
+                          format: date-time
+                          type: string
+                      required:
+                      - end
+                      - id
+                      - incidentId
+                      - minReplicas
+                      - start
+                      type: object
+                    reason:
+                      type: string
+                    trace:
+                      items:
+                        description: TraceEntry records one agent tool call.
+                        properties:
+                          args:
+                            maxLength: 200
+                            type: string
+                          latencyMs:
+                            format: int32
+                            type: integer
+                          resultBytes:
+                            format: int32
+                            type: integer
+                          tool:
+                            type: string
+                        required:
+                        - tool
+                        type: object
+                      maxItems: 8
+                      type: array
+                  required:
+                  - confidence
+                  - expires
+                  - incidentId
+                  - override
+                  type: object
+                maxItems: 3
+                type: array
               readyReplicas:
                 format: int32
                 type: integer
+              recentOutcomes:
+                items:
+                  description: RecentOutcome summarizes a past agent proposal and
+                    how it turned out.
+                  properties:
+                    incidentId:
+                      type: string
+                    minReplicas:
+                      format: int32
+                      type: integer
+                    outcome:
+                      description: Outcome is the retrospective score of an agent
+                        decision.
+                      properties:
+                        needed:
+                          type: boolean
+                        scoredAt:
+                          format: date-time
+                          type: string
+                        timely:
+                          description: Timely is nil until it can be judged.
+                          type: boolean
+                        wastedReplicaMinutes:
+                          pattern: ^[0-9]+(\.[0-9]+)?$
+                          type: string
+                      required:
+                      - scoredAt
+                      type: object
+                    time:
+                      format: date-time
+                      type: string
+                    verdict:
+                      description: Verdict is the enforcer's outcome for a decision.
+                      type: string
+                  required:
+                  - incidentId
+                  - minReplicas
+                  - time
+                  - verdict
+                  type: object
+                maxItems: 10
+                type: array
               timeToReady:
                 description: TimeToReadyStatus summarizes observed pod time-to-ready.
                 properties:

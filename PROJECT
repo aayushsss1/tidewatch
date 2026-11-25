@@ -26,4 +26,12 @@ resources:
   kind: TideWorkload
   path: github.com/aayushsss1/tidewatch/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: dev
+  group: tidewatch
+  kind: TideEpisode
+  path: github.com/aayushsss1/tidewatch/api/v1alpha1
+  version: v1alpha1
 version: "3"

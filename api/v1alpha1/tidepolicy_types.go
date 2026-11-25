@@ -37,6 +37,57 @@ type TidePolicySpec struct {
 	Forecasting ForecastingSpec `json:"forecasting,omitzero"`
 	// +required
 	Guardrails GuardrailsSpec `json:"guardrails"`
+	// +kubebuilder:default={}
+	// +optional
+	Agent AgentSpec `json:"agent,omitzero"`
+}
+
+// LocalObjectRef names an object in the policy's namespace.
+type LocalObjectRef struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// AgentContext is operator-supplied background for the agent.
+type AgentContext struct {
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	Notes string `json:"notes,omitempty"`
+	// +optional
+	ConfigMapRef *LocalObjectRef `json:"configMapRef,omitempty"`
+}
+
+// AgentSpec configures the AI agent layer.
+type AgentSpec struct {
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// +kubebuilder:validation:Enum=Manual;Auto
+	// +kubebuilder:default=Manual
+	// +optional
+	Approval string `json:"approval,omitempty"`
+	// +kubebuilder:default="10m"
+	// +optional
+	ApprovalTimeout metav1.Duration `json:"approvalTimeout,omitzero"`
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+	// +kubebuilder:default="0.6"
+	// +optional
+	MinConfidence string `json:"minConfidence,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	// +kubebuilder:default=8
+	// +optional
+	MaxToolCalls int32 `json:"maxToolCalls,omitempty"`
+	// +kubebuilder:default="60s"
+	// +optional
+	InvestigationTimeout metav1.Duration `json:"investigationTimeout,omitzero"`
+	// +kubebuilder:default={}
+	// +optional
+	Context AgentContext `json:"context,omitzero"`
+	// +optional
+	RedactEventMessages bool `json:"redactEventMessages,omitempty"`
+	// +optional
+	NotifyOnAuto bool `json:"notifyOnAuto,omitempty"`
 }
 
 // PrometheusSpec locates the Prometheus used for load history.

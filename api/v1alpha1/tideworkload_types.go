@@ -95,6 +95,17 @@ type TideWorkloadStatus struct {
 	// +kubebuilder:validation:MaxItems=5
 	// +optional
 	Decisions []Decision `json:"decisions,omitempty"`
+	// +kubebuilder:validation:MaxItems=3
+	// +optional
+	Overrides []Override `json:"overrides,omitempty"`
+	// +kubebuilder:validation:MaxItems=3
+	// +optional
+	PendingApprovals []PendingApproval `json:"pendingApprovals,omitempty"`
+	// +kubebuilder:validation:MaxItems=10
+	// +optional
+	RecentOutcomes []RecentOutcome `json:"recentOutcomes,omitempty"`
+	// +optional
+	BaselineReplicas int32 `json:"baselineReplicas,omitempty"`
 	// LastAction is a human-readable summary, e.g. "scale 2→5 (baseline)".
 	// +optional
 	LastAction string `json:"lastAction,omitempty"`
@@ -117,6 +128,7 @@ type TideWorkloadStatus struct {
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.status.trustedModel`
 // +kubebuilder:printcolumn:name="Last-Action",type=string,JSONPath=`.status.lastAction`
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.status.mode`
+// +kubebuilder:printcolumn:name="Overrides",type=string,priority=1,JSONPath=`.status.overrides[*].minReplicas`
 
 // TideWorkload is the Schema for the tideworkloads API
 type TideWorkload struct {

@@ -1,0 +1,181 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: tideepisodes.tidewatch.dev
+spec:
+  group: tidewatch.dev
+  names:
+    kind: TideEpisode
+    listKind: TideEpisodeList
+    plural: tideepisodes
+    singular: tideepisode
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.lead
+      name: Lead
+      type: string
+    - jsonPath: .spec.peakRatio
+      name: Peak-Ratio
+      type: string
+    - jsonPath: .spec.start
+      name: Start
+      type: date
+    - jsonPath: .spec.source
+      name: Source
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: TideEpisode is the Schema for the tideepisodes API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: TideEpisodeSpec defines a recorded or manually entered load
+              episode.
+            properties:
+              action:
+                description: Action is what was done during the episode.
+                type: string
+              calendar:
+                description: EpisodeCalendar locates an episode in the weekly cycle.
+                properties:
+                  hour:
+                    format: int32
+                    maximum: 23
+                    minimum: 0
+                    type: integer
+                  timezone:
+                    type: string
+                  weekday:
+                    type: string
+                type: object
+              context:
+                description: EpisodeContext holds operator-supplied context about
+                  an episode.
+                properties:
+                  deploy:
+                    type: boolean
+                  opsNote:
+                    maxLength: 200
+                    type: string
+                type: object
+              end:
+                format: date-time
+                type: string
+              historyCoverageHours:
+                format: int32
+                type: integer
+              lead:
+                description: Lead is the workload whose load rose first.
+                minLength: 1
+                type: string
+              members:
+                items:
+                  description: EpisodeMember is a workload that moved with the lead,
+                    lagging it.
+                  properties:
+                    lagSeconds:
+                      format: int32
+                      type: integer
+                    workload:
+                      minLength: 1
+                      type: string
+                  required:
+                  - workload
+                  type: object
+                type: array
+              notes:
+                type: string
+              outcome:
+                description: Outcome is the retrospective score of an agent decision.
+                properties:
+                  needed:
+                    type: boolean
+                  scoredAt:
+                    format: date-time
+                    type: string
+                  timely:
+                    description: Timely is nil until it can be judged.
+                    type: boolean
+                  wastedReplicaMinutes:
+                    pattern: ^[0-9]+(\.[0-9]+)?$
+                    type: string
+                required:
+                - scoredAt
+                type: object
+              peakAt:
+                format: date-time
+                type: string
+              peakRatio:
+                pattern: ^[0-9]+(\.[0-9]+)?$
+                type: string
+              policyRef:
+                description: PolicyRef points at the TidePolicy governing a workload.
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              shape:
+                description: 'Shape is the normalized load curve: 0 or 32 decimal
+                  points.'
+                items:
+                  pattern: ^[0-9]+(\.[0-9]+)?$
+                  type: string
+                type: array
+              source:
+                enum:
+                - recorded
+                - manual
+                type: string
+              start:
+                format: date-time
+                type: string
+            required:
+            - end
+            - lead
+            - peakAt
+            - peakRatio
+            - policyRef
+            - source
+            - start
+            type: object
+            x-kubernetes-validations:
+            - message: shape must have 0 or 32 points
+              rule: '!has(self.shape) || size(self.shape) == 0 || size(self.shape)
+                == 32'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}
