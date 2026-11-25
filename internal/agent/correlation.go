@@ -67,6 +67,7 @@ func (c *Correlator) Related(a, b types.UID) (corr float64, lag time.Duration, o
 	sb, okB := c.src.Series(b)
 	v := pairVal{at: now}
 	if okA && okB {
+		sa, sb = alignToGrid(sa), alignToGrid(sb)
 		v.corr, v.lag = LaggedCorrelation(sa, sb, maxLag)
 		v.ok = !math.IsNaN(v.corr)
 		if !v.ok {
@@ -77,6 +78,21 @@ func (c *Correlator) Related(a, b types.UID) (corr float64, lag time.Duration, o
 	c.cache[k] = v
 	c.mu.Unlock()
 	return v.corr, v.lag, v.ok
+}
+
+// alignToGrid snaps point times to the nearest multiple of the step. The
+// collector's grid is anchored at the first fetch, so two workloads whose
+// history is not a whole number of steps would otherwise never share timestamps,
+// and LaggedCorrelation matches timestamps exactly.
+func alignToGrid(s forecast.Series) forecast.Series {
+	if s.Step <= 0 {
+		return s
+	}
+	out := forecast.Series{Step: s.Step, Points: make([]forecast.Point, len(s.Points))}
+	for i, p := range s.Points {
+		out.Points[i] = forecast.Point{T: p.T.Round(s.Step), V: p.V}
+	}
+	return out
 }
 
 // prune drops expired entries, at most once per TTL. Callers hold c.mu.

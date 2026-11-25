@@ -193,9 +193,9 @@ func TestHoltWinters_ToleratesNaNGap(t *testing.T) {
 	}
 }
 
-func TestHoltWinters_AllNaNInitialSeasonIsInsufficientHistory(t *testing.T) {
-	s := hwSeries(96, func(i int) float64 {
-		if i < 24 {
+func TestHoltWinters_AllNaNSecondInitialSeasonIsInsufficientHistory(t *testing.T) {
+	s := hwSeries(96, func(i int) float64 { // data, then a whole empty season: not a leading gap
+		if i >= 24 && i < 48 {
 			return math.NaN()
 		}
 		return sineAt(i)
@@ -203,5 +203,37 @@ func TestHoltWinters_AllNaNInitialSeasonIsInsufficientHistory(t *testing.T) {
 	_, err := NewHoltWinters(HoltWintersOptions{}).Forecast(context.Background(), s, hwSeason, hwSeason)
 	if !errors.Is(err, ErrInsufficientHistory) {
 		t.Fatalf("err = %v, want ErrInsufficientHistory", err)
+	}
+}
+
+func TestHoltWinters_InitializesAfterLeadingNaNSeasons(t *testing.T) {
+	full := hwSeries(120, sineAt)
+	gappy := Series{Step: full.Step, Points: append([]Point(nil), full.Points...)}
+	for i := range 24 { // a whole leading season with no data: a new workload
+		gappy.Points[i].V = math.NaN()
+	}
+	ctx := context.Background()
+	got, err := NewHoltWinters(HoltWintersOptions{}).Forecast(ctx, gappy, hwSeason, hwSeason)
+	if err != nil {
+		t.Fatalf("leading NaN season: %v", err)
+	}
+	trimmed := Series{Step: full.Step, Points: full.Points[24:]}
+	want, err := NewHoltWinters(HoltWintersOptions{}).Forecast(ctx, trimmed, hwSeason, hwSeason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range want.Points {
+		if got.Points[i].Point != want.Points[i].Point || !got.Points[i].T.Equal(want.Points[i].T) {
+			t.Fatalf("point %d = %+v, want %+v", i, got.Points[i], want.Points[i])
+		}
+	}
+
+	short := hwSeries(60, sineAt) // 24 NaN then 36 valid: fewer than two valid seasons
+	for i := range 24 {
+		short.Points[i].V = math.NaN()
+	}
+	_, err = NewHoltWinters(HoltWintersOptions{}).Forecast(ctx, short, hwSeason, hwSeason)
+	if !errors.Is(err, ErrInsufficientHistory) {
+		t.Errorf("err = %v, want ErrInsufficientHistory", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -85,7 +86,14 @@ func (e *Engine) decide(ctx context.Context, it *item, others int32) {
 		return
 	}
 	if err := e.scale.Set(ctx, it.target, res.Final); err != nil {
-		logf.Log.WithName("engine").Error(err, "Scaling target", "workload", client.ObjectKeyFromObject(it.tw))
+		log := logf.Log.WithName("engine").WithValues("workload", client.ObjectKeyFromObject(it.tw))
+		if apierrors.IsNotFound(err) {
+			// The target vanished mid-tick; the next tick drops the workload.
+			log.V(1).Info("Scale target not found", "error", err.Error())
+			it.skipStatus = true
+		} else {
+			log.Error(err, "Scaling target")
+		}
 		it.decision.Verdict, it.decision.Final = v1.VerdictHeld, it.scale.Replicas
 		it.decision.Reasons = append(it.decision.Reasons, reasonScaleFailed)
 		return
@@ -104,6 +112,8 @@ func (e *Engine) finish(ctx context.Context, it *item) {
 	d := it.decision
 	decisionsTotal.WithLabelValues(string(d.Source), string(d.Verdict), it.tw.Namespace, it.tw.Name).Inc()
 	desiredReplicasGauge.WithLabelValues(it.tw.Namespace, it.tw.Name).Set(float64(d.Desired))
-	e.writeStatus(ctx, it)
+	if !it.skipStatus {
+		e.writeStatus(ctx, it)
+	}
 	stepDuration.WithLabelValues(it.tw.Namespace, it.tw.Name).Observe(it.dur.Seconds())
 }

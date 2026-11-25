@@ -33,6 +33,7 @@ const (
 	reasonInvalidConfig      = "invalid_config"
 	reasonNoData             = "no_data"
 	reasonScaleFailed        = "scale_failed"
+	reasonNotSelected        = "not_selected"
 	seasonalNaiveName        = "seasonal-naive"
 	defaultPromTimeout       = 10 * time.Second
 )
@@ -238,20 +239,21 @@ func (e *Engine) knownReplicas(list *v1.TideWorkloadList) map[v1.PolicyRef]map[t
 }
 
 func (e *Engine) querier(url string, timeout time.Duration) (*promEntry, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if p, ok := e.proms[url]; ok {
-		return p, nil
-	}
 	if timeout <= 0 {
 		timeout = defaultPromTimeout
+	}
+	key := url + "|" + timeout.String()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if p, ok := e.proms[key]; ok {
+		return p, nil
 	}
 	q, err := e.opts.PromFactory(url, timeout)
 	if err != nil {
 		return nil, err
 	}
 	p := &promEntry{q: q, col: NewCollector(q)}
-	e.proms[url] = p
+	e.proms[key] = p
 	return p, nil
 }
 
@@ -303,6 +305,13 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		it.events = append(it.events, e.ov.TakeDecisions(tw.UID)...)
 	}
 	st.ttr.Observe(it.now, scale.Ready)
+
+	// The controller resyncs selectors only periodically: never act on a target
+	// that has since left the policy.
+	if !e.stillSelected(ctx, &pol, target) {
+		e.held(it, reasonNotSelected)
+		return it
+	}
 
 	cfg, err := workload.Effective(pol.Spec, pol.Annotations[v1.AnnoPaused] == "true", target.Object, target.Ref.Kind)
 	if err != nil {
@@ -433,6 +442,15 @@ func (e *Engine) runModels(ctx context.Context, it *item, series forecast.Series
 // unavailable records a held decision and skips phase 2 for the workload.
 func (e *Engine) unavailable(it *item, reason, msg string) {
 	it.forecasting = condFalse(reason, msg)
+	it.decision = v1.Decision{
+		Time: metav1.NewTime(it.now), Source: v1.SourceBaseline,
+		Desired: it.scale.Replicas, Final: it.scale.Replicas,
+		Verdict: v1.VerdictHeld, Reasons: []string{reason},
+	}
+}
+
+// held records a held decision without touching the Forecasting condition.
+func (e *Engine) held(it *item, reason string) {
 	it.decision = v1.Decision{
 		Time: metav1.NewTime(it.now), Source: v1.SourceBaseline,
 		Desired: it.scale.Replicas, Final: it.scale.Replicas,

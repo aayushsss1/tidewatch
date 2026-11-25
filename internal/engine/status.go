@@ -134,6 +134,9 @@ func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
 	if it.enforce {
 		meta.SetStatusCondition(&s.Conditions, it.budgetCondition())
 		e.fillForecastStatus(s, it)
+	} else {
+		// A held tick has no fresh forecast: do not leave the last one looking current.
+		s.ForecastPeak, s.PeakTime, s.Forecasts, s.Load = "", nil, nil, ""
 	}
 }
 

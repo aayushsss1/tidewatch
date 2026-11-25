@@ -14,7 +14,7 @@ const (
 	overProvUrgency    = 0.01
 	disagreementUrgent = 0.3
 	changeUrgent       = 0.5
-	anomalyFallback    = 0.5 // Anomaly triggers carry no shortfall; see report
+	anomalyFallback    = 0.5 // used only when an Anomaly trigger carries no shortfall (no positive forecast)
 )
 
 // Urgency returns the highest per-trigger urgency (spec §7.3) and the

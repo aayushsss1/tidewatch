@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -15,8 +16,10 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
@@ -34,7 +37,12 @@ import (
 
 const inc1 = "inc-1"
 
-const busybox = "busybox"
+const (
+	busybox    = "busybox"
+	deployKind = "Deployment"
+	profileRPS = "rps"
+	appsAPI    = "apps/v1"
+)
 
 const (
 	testNS   = "default"
@@ -53,6 +61,18 @@ func (s *spyScale) Get(context.Context, workload.Target) (workload.ScaleState, e
 func (s *spyScale) Set(context.Context, workload.Target, int32) error {
 	s.sets.Add(1)
 	return nil
+}
+
+// notFoundScale reads a state that needs a scale-up and fails every Set with NotFound.
+type notFoundScale struct{ sets atomic.Int32 }
+
+func (*notFoundScale) Get(context.Context, workload.Target) (workload.ScaleState, error) {
+	return workload.ScaleState{Replicas: 2, Ready: 2}, nil
+}
+
+func (s *notFoundScale) Set(context.Context, workload.Target, int32) error {
+	s.sets.Add(1)
+	return apierrors.NewNotFound(schema.GroupResource{Resource: "deployments"}, "gone")
 }
 
 // loadQuerier serves load(t) sampled on the requested grid.
@@ -154,10 +174,10 @@ var _ = Describe("Engine", func() {
 			Spec: v1.TidePolicySpec{
 				Mode:       mode,
 				Prometheus: v1.PrometheusSpec{URL: "http://fake"},
-				Selector:   v1.WorkloadSelector{Kinds: []v1.TargetKind{{APIVersion: "apps/v1", Kind: "Deployment"}}},
+				Selector:   v1.WorkloadSelector{Kinds: []v1.TargetKind{{APIVersion: appsAPI, Kind: deployKind}}},
 				Load: v1.LoadSpec{
-					DefaultProfile: "rps",
-					Profiles:       map[string]v1.LoadProfile{"rps": {Query: "up", TargetPerReplica: "10"}},
+					DefaultProfile: profileRPS,
+					Profiles:       map[string]v1.LoadProfile{profileRPS: {Query: "up", TargetPerReplica: "10"}},
 				},
 				Forecasting: v1.ForecastingSpec{
 					Horizon:     metav1.Duration{Duration: 30 * time.Minute},
@@ -189,7 +209,7 @@ var _ = Describe("Engine", func() {
 			ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name},
 			Spec: v1.TideWorkloadSpec{
 				PolicyRef: v1.PolicyRef{Namespace: testNS, Name: pol},
-				TargetRef: v1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Name: name},
+				TargetRef: v1.TargetRef{APIVersion: appsAPI, Kind: deployKind, Name: name},
 			},
 		}
 		Expect(k8sClient.Create(ctx, tw)).To(Succeed())
@@ -356,6 +376,13 @@ var _ = Describe("Engine", func() {
 				e.Step(ctx)
 			}
 			Expect(has(signal.Anomaly)).To(BeTrue())
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for _, g := range s.got {
+				if g.Type == signal.Anomaly {
+					Expect(g.Shortfall).To(BeNumerically(">", 0), "Anomaly carries |actual-forecast|/forecast")
+				}
+			}
 		})
 
 		It("raises WorkloadChange from restarts and OOMKills read from pods", func() {
@@ -904,6 +931,81 @@ var _ = Describe("Engine", func() {
 		})
 	})
 
+	It("skips a workload whose labels no longer match the policy", func() {
+		p := &v1.TidePolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: pol},
+			Spec: v1.TidePolicySpec{
+				Mode:       v1.ModeActive,
+				Prometheus: v1.PrometheusSpec{URL: "http://fake"},
+				Selector: v1.WorkloadSelector{
+					LabelSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tier": "web"}},
+					Kinds:         []v1.TargetKind{{APIVersion: appsAPI, Kind: deployKind}},
+				},
+				Load: v1.LoadSpec{
+					DefaultProfile: profileRPS,
+					Profiles:       map[string]v1.LoadProfile{profileRPS: {Query: "up", TargetPerReplica: "10"}},
+				},
+				Forecasting: v1.ForecastingSpec{
+					Horizon: metav1.Duration{Duration: 30 * time.Minute}, History: metav1.Duration{Duration: 3 * time.Hour},
+					Step: metav1.Duration{Duration: testStep}, Seasonality: metav1.Duration{Duration: season},
+				},
+				Guardrails: v1.GuardrailsSpec{MaxReplicas: 50},
+			},
+		}
+		Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		label := func(name, tier string) {
+			d := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: name}, d)).To(Succeed())
+			d.Labels = map[string]string{"tier": tier}
+			Expect(k8sClient.Update(ctx, d)).To(Succeed())
+		}
+		newWorkload("still-selected", 2)
+		newWorkload("deselected", 2)
+		label("still-selected", "web")
+		label("deselected", "batch") // relabeled after the TideWorkload was created
+		eng.Step(ctx)
+
+		Expect(replicasOf("still-selected")).To(BeNumerically(">", 2))
+		Expect(replicasOf("deselected")).To(Equal(int32(2)))
+		st := statusOf("deselected")
+		Expect(st.Decisions).NotTo(BeEmpty())
+		Expect(st.Decisions[0].Verdict).To(Equal(v1.VerdictHeld))
+		Expect(st.Decisions[0].Reasons).To(ContainElement("not_selected"))
+	})
+
+	It("held path clears stale forecast fields", func() {
+		newPolicy(v1.ModeActive, nil)
+		newWorkload("stale", 2)
+		eng.Step(ctx)
+		before := statusOf("stale")
+		Expect(before.ForecastPeak).NotTo(BeEmpty())
+		Expect(before.Forecasts).NotTo(BeEmpty())
+		Expect(before.Load).NotTo(BeEmpty())
+
+		q.readyErr = errors.New("down")
+		clk.Step(2 * testStep)
+		eng.Step(ctx)
+		after := statusOf("stale")
+		Expect(after.Decisions[0].Verdict).To(Equal(v1.VerdictHeld))
+		Expect(after.ForecastPeak).To(BeEmpty())
+		Expect(after.PeakTime).To(BeNil())
+		Expect(after.Forecasts).To(BeEmpty())
+		Expect(after.Load).To(BeEmpty())
+	})
+
+	It("skips the status write when the scale target vanished (Set NotFound)", func() {
+		newPolicy(v1.ModeActive, nil)
+		newWorkload("vanished", 2)
+		spy := &notFoundScale{}
+		e := New(k8sClient, Options{
+			Clock: clk, Scale: spy, DefaultTimeToReady: 5 * time.Minute,
+			PromFactory: func(string, time.Duration) (prom.Querier, error) { return q, nil },
+		})
+		e.Step(ctx)
+		Expect(spy.sets.Load()).To(BeNumerically(">", 0))
+		Expect(statusOf("vanished").Decisions).To(BeEmpty())
+	})
+
 	It("skips workloads whose target is missing", func() {
 		newPolicy(v1.ModeActive, nil)
 		newWorkload("orphan", 2)
@@ -922,4 +1024,23 @@ type countingReader struct {
 func (c countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	c.n.Add(1)
 	return c.Reader.Get(ctx, key, obj, opts...)
+}
+
+func TestQuerierCacheKeyIncludesTimeout(t *testing.T) {
+	var built atomic.Int32
+	e := New(nil, Options{PromFactory: func(string, time.Duration) (prom.Querier, error) {
+		built.Add(1)
+		return &loadQuerier{}, nil
+	}})
+	for _, tc := range []struct {
+		timeout time.Duration
+		want    int32
+	}{{5 * time.Second, 1}, {5 * time.Second, 1}, {10 * time.Second, 2}, {0, 2}, {defaultPromTimeout, 2}, {time.Second, 3}} {
+		if _, err := e.querier("http://p", tc.timeout); err != nil {
+			t.Fatal(err)
+		}
+		if got := built.Load(); got != tc.want {
+			t.Fatalf("after timeout %v built = %d, want %d", tc.timeout, got, tc.want)
+		}
+	}
 }

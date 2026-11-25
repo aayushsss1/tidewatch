@@ -66,6 +66,17 @@ func (hw *holtWinters) Forecast(ctx context.Context, s Series, horizon, season t
 			return Forecast{}, fmt.Errorf("%w: non-finite input", ErrModelFailed)
 		}
 	}
+	// A new workload has no data before it appeared: skip leading seasons with no
+	// valid sample. Dropping whole seasons keeps the seasonal phase of the rest.
+	lead := 0
+	for lead+m <= n && allNaN(y[lead:lead+m]) {
+		lead += m
+	}
+	y = y[lead:]
+	if len(y) < 2*m {
+		return Forecast{}, fmt.Errorf("%w: have %d points after skipping empty leading seasons, need %d",
+			ErrInsufficientHistory, len(y), 2*m)
+	}
 	if _, _, ok := hwInit(y, m); !ok {
 		return Forecast{}, fmt.Errorf("%w: an initial season has no valid samples", ErrInsufficientHistory)
 	}
@@ -79,7 +90,7 @@ func (hw *holtWinters) Forecast(ctx context.Context, s Series, horizon, season t
 	params := hw.params
 	hw.mu.Unlock()
 
-	st := runHW(y, m, params)
+	st := runHW(y, m, params) // n stays the full length: whole-season trims keep (n+h-1)%m in phase
 	sigma := 0.0
 	if len(st.errs) >= 2 {
 		sigma = stdDev(st.errs)
@@ -149,6 +160,15 @@ func runHW(y []float64, m int, p hwParams) hwState {
 		st.seasonal[si] = p.gamma*(v-st.level) + (1-p.gamma)*st.seasonal[si]
 	}
 	return st
+}
+
+func allNaN(xs []float64) bool {
+	for _, x := range xs {
+		if !math.IsNaN(x) {
+			return false
+		}
+	}
+	return true
 }
 
 // hwInit returns the NaN-aware means of the first two seasons; ok is false when

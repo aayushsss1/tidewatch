@@ -58,6 +58,7 @@ func (e *Engine) detectTriggers(ctx context.Context, it *item, healthy bool) {
 		Actual:      it.actual,
 		Capacity:    float64(it.scale.Replicas) * it.cfg.TargetPerReplica * it.cfg.Headroom,
 		Trusted:     it.trusted, Forecasts: it.forecasts, OutsideSteps: outside,
+		AnomalyForecast: st.anomalyPoint,
 		TemplateChanged: e.templateChanged(it), OOMKilled: oom,
 		ExternalReplicaChange: st.externalChange, Restarts5m: restarts,
 		Notes: e.notes(ctx, it), Healthy: true,
@@ -79,6 +80,7 @@ func (e *Engine) trackOutside(it *item, healthy bool) int {
 		return st.outsideSteps
 	}
 	st.outsideAt = it.now
+	st.anomalyPoint = 0
 	if math.IsNaN(it.actual) {
 		st.outsideSteps = 0
 		return 0
@@ -89,6 +91,7 @@ func (e *Engine) trackOutside(it *item, healthy bool) int {
 		}
 		for _, p := range f.Points {
 			if p.T.Equal(it.now) {
+				st.anomalyPoint = p.Point
 				if it.actual < p.Lower || it.actual > p.Upper {
 					st.outsideSteps++
 				} else {

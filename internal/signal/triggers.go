@@ -61,7 +61,8 @@ type Input struct {
 	Capacity                   float64 // current replicas × targetPerReplica × headroom
 	Trusted                    *forecast.Forecast
 	Forecasts                  []forecast.Forecast
-	OutsideSteps               int // consecutive steps actual was outside the trusted interval
+	OutsideSteps               int     // consecutive steps actual was outside the trusted interval
+	AnomalyForecast            float64 // trusted point forecast for Now that Actual is judged against; <= 0 if unknown
 	TemplateChanged            bool
 	OOMKilled                  bool
 	ExternalReplicaChange      bool
@@ -147,7 +148,7 @@ func Detect(in Input, uid types.UID, wl types.NamespacedName, pol v1.PolicyRef, 
 			fmt.Sprintf("trusted upper bound exceeds capacity by %.0f%% in %s", shortfall*100, ttb.Round(time.Second)))
 	}
 	if in.OutsideSteps >= anomalySteps {
-		emit(Anomaly, float64(in.OutsideSteps), nil, 0,
+		emit(Anomaly, float64(in.OutsideSteps), nil, anomalyShortfall(in),
 			fmt.Sprintf("load outside the trusted interval for %d consecutive steps", in.OutsideSteps))
 	}
 	if diff, ok := modelDisagreement(in); ok {
@@ -169,6 +170,14 @@ func Detect(in Input, uid types.UID, wl types.NamespacedName, pol v1.PolicyRef, 
 		emit(OverProvisioned, 0, nil, 0, "every model stays under 50% of capacity for the whole horizon")
 	}
 	return out
+}
+
+// anomalyShortfall is |actual − forecast| / forecast, or 0 without a positive forecast.
+func anomalyShortfall(in Input) float64 {
+	if in.AnomalyForecast <= 0 || math.IsNaN(in.Actual) || math.IsInf(in.Actual, 0) {
+		return 0
+	}
+	return math.Abs(in.Actual-in.AnomalyForecast) / in.AnomalyForecast
 }
 
 func forecastBreach(in Input) (ttb time.Duration, shortfall float64, ok bool) {

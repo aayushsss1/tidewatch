@@ -46,6 +46,7 @@ type wlState struct {
 	// Trigger detection inputs (only maintained when Options.Triggers is set).
 	prevForecasts  []forecast.Forecast // last tick's forecasts, to judge the current step
 	outsideSteps   int
+	anomalyPoint   float64 // trusted point forecast of the last judged step, 0 when none
 	outsideAt      time.Time
 	tplSig         uint64
 	tplSeen        bool
@@ -84,6 +85,7 @@ type item struct {
 	budget      bool
 	decision    v1.Decision
 	enforce     bool // phase 2 should run Enforce
+	skipStatus  bool // the target vanished mid-tick: do not write status
 
 	events           []v1.Decision // extra decisions for this tick, oldest first
 	baselineReplicas int32         // Desired before any override

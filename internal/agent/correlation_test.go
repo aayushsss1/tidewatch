@@ -94,6 +94,20 @@ func TestCorrelator_CachesAndMissingData(t *testing.T) {
 	}
 }
 
+func TestCorrelator_AlignsOffGridSeries(t *testing.T) {
+	a := wave(40)
+	sb := mkSeries(time.Minute, a)
+	for i := range sb.Points { // a collector whose grid is offset from a's by 20s
+		sb.Points[i].T = sb.Points[i].T.Add(20 * time.Second)
+	}
+	src := &fakeSrc{m: map[types.UID]forecast.Series{"a": mkSeries(time.Minute, a), "b": sb}}
+	c := NewCorrelator(src, clocktesting.NewFakeClock(t0))
+	corr, lag, ok := c.Related("a", "b")
+	if !ok || corr < 0.99 || lag != 0 {
+		t.Fatalf("corr=%v lag=%v ok=%v", corr, lag, ok)
+	}
+}
+
 func TestCorrelator_PrunesStaleEntries(t *testing.T) {
 	a := wave(40)
 	src := &fakeSrc{m: map[types.UID]forecast.Series{"a": mkSeries(time.Minute, a), "b": mkSeries(time.Minute, a), "c": mkSeries(time.Minute, a)}}

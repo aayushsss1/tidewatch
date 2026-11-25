@@ -123,6 +123,27 @@ func TestDetect_Anomaly(t *testing.T) {
 	}
 }
 
+func TestDetect_AnomalyShortfall(t *testing.T) {
+	in := base()
+	in.OutsideSteps = 3
+	in.Actual, in.AnomalyForecast = 150, 100
+	if tr := has(detect(in), Anomaly); tr == nil || tr.Shortfall != 0.5 {
+		t.Fatalf("shortfall = %+v, want 0.5", tr)
+	}
+	in = base()
+	in.OutsideSteps = 3
+	in.Actual, in.AnomalyForecast = 40, 100 // below the interval: symmetric
+	if tr := has(detect(in), Anomaly); tr == nil || tr.Shortfall != 0.6 {
+		t.Fatalf("shortfall = %+v, want 0.6", tr)
+	}
+	in = base()
+	in.OutsideSteps = 3
+	in.Actual, in.AnomalyForecast = 150, 0 // no usable forecast
+	if tr := has(detect(in), Anomaly); tr == nil || tr.Shortfall != 0 {
+		t.Fatalf("shortfall = %+v, want 0", tr)
+	}
+}
+
 func TestDetect_ModelDisagreement(t *testing.T) {
 	in := base()
 	a, b := fc("a", flat(60), flat(70)), fc("b", flat(150), flat(160))
