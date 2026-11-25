@@ -184,11 +184,17 @@ func TestResolveAll_SkipsKindsWithoutScale(t *testing.T) {
 type failingClient struct {
 	client.Client
 	failKinds map[string]error
+	// onlyNS, when set, restricts failKinds to lists in that namespace.
+	onlyNS string
 }
 
 func (f failingClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	if err, ok := f.failKinds[list.GetObjectKind().GroupVersionKind().Kind]; ok {
-		return err
+		lo := &client.ListOptions{}
+		lo.ApplyOptions(opts)
+		if f.onlyNS == "" || lo.Namespace == f.onlyNS {
+			return err
+		}
 	}
 	return f.Client.List(ctx, list, opts...)
 }
@@ -216,6 +222,24 @@ func TestResolveAll_MissingKindSkippedGoodKindResolves(t *testing.T) {
 				t.Fatalf("issues: %v", res.Issues[ref])
 			}
 		})
+	}
+}
+
+func TestResolveAll_ForbiddenInOneNamespaceKeepsOthers(t *testing.T) {
+	r := newResolver(deploy("a", webName, nil), deploy("b", "api", nil))
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "", errors.New("no"))
+	r.Client = failingClient{Client: r.Client, failKinds: map[string]error{"DeploymentList": forbidden}, onlyNS: "a"}
+	p := policy("p", "pol", selector([]string{"a", "b"}, nil, deployKind))
+	res, err := r.ResolveAll(context.Background(), []v1.TidePolicy{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := v1.PolicyRef{Namespace: "p", Name: "pol"}
+	if len(res.Targets[ref]) != 1 || res.Targets[ref][0].Namespace != "b" {
+		t.Fatalf("targets: %+v", res.Targets[ref])
+	}
+	if len(res.Issues[ref]) != 1 || !strings.Contains(res.Issues[ref][0], "namespace a") {
+		t.Fatalf("issues: %v", res.Issues[ref])
 	}
 }
 

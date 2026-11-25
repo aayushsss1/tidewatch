@@ -118,8 +118,11 @@ func (r *Resolver) ResolveAll(ctx context.Context, policies []v1.TidePolicy) (Re
 				if err := r.Client.List(ctx, list, client.InNamespace(ns), client.MatchingLabelsSelector{Selector: sel}); err != nil {
 					if skippable(err) {
 						issues[ref] = append(issues[ref],
-							fmt.Sprintf("kind %s/%s skipped: %v", kind.APIVersion, kind.Kind, err))
-						break // the kind is unavailable in every namespace
+							fmt.Sprintf("kind %s/%s skipped in namespace %s: %v", kind.APIVersion, kind.Kind, ns, err))
+						if meta.IsNoMatchError(err) {
+							break // the kind is not installed, so it is unavailable in every namespace
+						}
+						continue // Forbidden/NotFound may be specific to this namespace
 					}
 					return Resolution{}, fmt.Errorf("list %s in %s: %w", kind.Kind, ns, err)
 				}
