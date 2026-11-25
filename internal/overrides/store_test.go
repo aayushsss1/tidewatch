@@ -372,3 +372,30 @@ func TestStore_QueuesResolutions(t *testing.T) {
 		t.Fatalf("queue should be bounded at 256, got %d", n)
 	}
 }
+
+func TestStore_AwaitingOutcome(t *testing.T) {
+	s := NewStore()
+	if s.AwaitingOutcome("i1", "u") {
+		t.Fatal("nothing created yet")
+	}
+	mustPend(t, s, pend("i1", 6, t0, t0.Add(time.Hour), t0.Add(10*time.Minute)))
+	if s.AwaitingOutcome("i1", "u") {
+		t.Fatal("a pending approval is not an override yet")
+	}
+	s.Approve("i1", "u", "alice", t0.Add(time.Minute))
+	if !s.AwaitingOutcome("i1", "u") {
+		t.Fatal("approved override must await its outcome")
+	}
+	s.Expire(t0.Add(2 * time.Hour)) // the override ended, but it is not scored yet
+	if !s.AwaitingOutcome("i1", "u") || s.AwaitingOutcome("i1", "other") {
+		t.Fatal("ended override still awaits scoring, only for its workload")
+	}
+	s.AddOutcome("u", v1.RecentOutcome{IncidentID: "i1", Verdict: v1.VerdictApplied}) // unscored entry
+	if !s.AwaitingOutcome("i1", "u") {
+		t.Fatal("an outcome without a score does not count")
+	}
+	s.AddOutcome("u", v1.RecentOutcome{IncidentID: "i1", Verdict: v1.VerdictApplied, Outcome: &v1.Outcome{}})
+	if s.AwaitingOutcome("i1", "u") {
+		t.Fatal("scored")
+	}
+}

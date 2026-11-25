@@ -40,6 +40,8 @@ const (
 	breakerTrips   = 5
 	breakerOpen    = 2 * time.Minute
 	finderWindow   = 30 * time.Minute
+	outcomeWait    = 3 * time.Hour // how long a closed incident waits for its overrides to be scored
+	maxClosing     = 256
 	defaultWorkers = 4
 	defaultBudget  = 200000
 	unknownTTR     = time.Minute
@@ -55,6 +57,14 @@ type RunnerOptions struct {
 	Provider           llm.Provider // nil disables the agent: incidents and episodes are still recorded
 	WebhookURL         string
 	Clock              clock.Clock
+}
+
+// closedIncident is an incident that closed but is not recorded yet because
+// some override created for it has not been scored.
+type closedIncident struct {
+	inc  *Incident
+	view *episodes.IncidentView
+	at   time.Time
 }
 
 type recentTrigger struct {
@@ -80,8 +90,9 @@ type Runner struct {
 	rec      *episodes.Recorder
 	notifier Notifier
 
-	recent  []recentTrigger // triggers within the storm window; RunOnce only
-	inStorm bool            // RunOnce only
+	closing []closedIncident // closed incidents waiting for outcomes; RunOnce only
+	recent  []recentTrigger  // triggers within the storm window; RunOnce only
+	inStorm bool             // RunOnce only
 }
 
 var _ engine.TriggerSink = (*Runner)(nil)
@@ -163,8 +174,9 @@ func (r *Runner) RunOnce(ctx context.Context) {
 	r.drain(ctx)
 	now := r.clk.Now()
 	for _, inc := range r.mgr.Tick(now) {
-		r.recordEpisode(ctx, inc)
+		r.closeIncident(inc, now)
 	}
+	r.recordReady(ctx, now)
 	if r.inStorm && !r.mgr.InStorm() {
 		r.inStorm = false
 		stormGauge.Set(0)
@@ -386,14 +398,55 @@ func (r *Runner) finderQuery(w tools.WorkloadRef) (string, []string, episodes.Qu
 	return pol.Namespace + "." + pol.Name, []string{pol.Namespace}, q, true
 }
 
-// recordEpisode stores a closed incident as an episode when it is notable.
-func (r *Runner) recordEpisode(ctx context.Context, inc *Incident) {
+// closeIncident queues a closed incident for recording. Its view is built now,
+// while the lead's load history still covers the incident; the outcomes are
+// folded in when it is recorded.
+func (r *Runner) closeIncident(inc *Incident, now time.Time) {
 	view, ok := r.view(inc)
-	if !ok || !r.rec.Notable(view) {
+	if !ok {
 		return
 	}
-	if err := r.rec.Record(ctx, r.rec.Build(view)); err != nil {
-		logf.FromContext(ctx).WithName("agent").Error(err, "Recording episode", "incident", inc.ID)
+	r.closing = append(r.closing, closedIncident{inc: inc, view: view, at: now})
+	if len(r.closing) > maxClosing { // bounded: the oldest is recorded as it is
+		r.closing[0].at = time.Time{}
+	}
+}
+
+// awaitingOutcome reports whether an override created for inc has no scored outcome yet.
+func (r *Runner) awaitingOutcome(inc *Incident) bool {
+	for uid := range inc.Members {
+		if r.store.AwaitingOutcome(inc.ID, uid) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordReady records the closed incidents whose overrides were all scored,
+// or that have waited outcomeWait since closing.
+func (r *Runner) recordReady(ctx context.Context, now time.Time) {
+	keep := r.closing[:0]
+	for _, c := range r.closing {
+		if now.Sub(c.at) < outcomeWait && r.awaitingOutcome(c.inc) {
+			keep = append(keep, c)
+			continue
+		}
+		r.recordEpisode(ctx, c)
+	}
+	clear(r.closing[len(keep):])
+	r.closing = keep
+}
+
+// recordEpisode stores a closed incident as an episode when it is notable.
+func (r *Runner) recordEpisode(ctx context.Context, c closedIncident) {
+	for uid := range c.inc.Members {
+		r.applyOutcomes(c.view, c.inc.ID, uid)
+	}
+	if !r.rec.Notable(c.view) {
+		return
+	}
+	if err := r.rec.Record(ctx, r.rec.Build(c.view)); err != nil {
+		logf.FromContext(ctx).WithName("agent").Error(err, "Recording episode", "incident", c.inc.ID)
 	}
 }
 

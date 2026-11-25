@@ -101,14 +101,53 @@ func TestRunner_EndToEnd(t *testing.T) {
 		t.Fatalf("replicas = %d, want 12 (override applied by the engine)", got)
 	}
 
+	_, ov := f.store.Active(f.uids["frontend-e2e"], f.clk.Now())
+	incID := ov.IncidentID
 	f.clk.Step(31 * time.Minute) // quiet for CloseAfter
+	r.RunOnce(f.ctx)
+	if n := len(f.episodes()); n != 0 {
+		t.Fatalf("episodes = %d: an incident with an unscored override must wait for its outcome", n)
+	}
+	timely := true
+	f.store.AddOutcome(f.uids["frontend-e2e"], v1.RecentOutcome{
+		IncidentID: incID, Verdict: v1.VerdictApplied, MinReplicas: 12,
+		Outcome: &v1.Outcome{Timely: &timely, Needed: true, ScoredAt: metav1.NewTime(f.clk.Now())},
+	})
 	r.RunOnce(f.ctx)
 	eps := f.episodes()
 	if len(eps) != 1 {
 		t.Fatalf("episodes = %d, want 1", len(eps))
 	}
-	if sp := eps[0].Spec; sp.Lead != "frontend-e2e" || sp.Source != "recorded" || !strings.Contains(sp.Action, "12") {
+	sp := eps[0].Spec
+	if sp.Lead != "frontend-e2e" || sp.Source != "recorded" || !strings.Contains(sp.Action, "12") {
 		t.Errorf("episode = %+v", sp)
+	}
+	if sp.Outcome == nil || sp.Outcome.Timely == nil || !*sp.Outcome.Timely {
+		t.Errorf("episode outcome = %+v, want the scored outcome", sp.Outcome)
+	}
+}
+
+func TestRunner_UnscoredEpisodeIsRecordedAfterThreeHours(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Auto", "frontend-3h")
+	f.cleanEpisodes()
+	r, _ := f.runner(true)
+	f.propose(0.9, ovIn{Workload: "frontend-3h", MinReplicas: 12})
+	r.Submit(f.trigger("frontend-3h", signal.ForecastBreach, f.clk.Now()))
+	r.RunOnce(f.ctx)
+	r.work(t)
+
+	f.clk.Step(31 * time.Minute)
+	r.RunOnce(f.ctx) // closes; the override is never scored
+	f.clk.Step(2*time.Hour + 58*time.Minute)
+	r.RunOnce(f.ctx)
+	if n := len(f.episodes()); n != 0 {
+		t.Fatalf("episodes = %d before the 3h limit", n)
+	}
+	f.clk.Step(3 * time.Minute) // now 3h+ since close
+	r.RunOnce(f.ctx)
+	eps := f.episodes()
+	if len(eps) != 1 || eps[0].Spec.Outcome != nil {
+		t.Fatalf("want one episode without an outcome, got %+v", eps)
 	}
 }
 

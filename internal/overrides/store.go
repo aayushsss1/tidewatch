@@ -72,6 +72,32 @@ type Store struct {
 	tombs []tombstone // verdicts of pending approvals that can no longer be applied
 	res   []Resolution
 	now   func() time.Time
+	made  map[madeKey]struct{} // overrides ever created, by incident and workload
+	madeQ []madeKey
+}
+
+type madeKey struct {
+	incident string
+	uid      types.UID
+}
+
+const maxMade = 512
+
+// AwaitingOutcome reports whether an override was created for incidentID on
+// uid and has no scored RecentOutcome yet. It is false for unknown workloads.
+func (s *Store) AwaitingOutcome(incidentID string, uid types.UID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.made[madeKey{incidentID, uid}]; !ok {
+		return false
+	}
+	d := s.data[uid]
+	if d == nil {
+		return false
+	}
+	return !slices.ContainsFunc(d.outcomes, func(r v1.RecentOutcome) bool {
+		return r.IncidentID == incidentID && r.Outcome != nil
+	})
 }
 
 // SetClock sets the time source used to stamp resolutions that carry no time
@@ -195,6 +221,17 @@ func (s *Store) AddPending(uid types.UID, p v1.PendingApproval) (superseded []v1
 }
 
 func (s *Store) addOverrideLocked(uid types.UID, o v1.Override) {
+	if k := (madeKey{o.IncidentID, uid}); s.made == nil || !hasKey(s.made, k) {
+		if s.made == nil {
+			s.made = map[madeKey]struct{}{}
+		}
+		s.made[k] = struct{}{}
+		s.madeQ = append(s.madeQ, k)
+		if len(s.madeQ) > maxMade {
+			delete(s.made, s.madeQ[0])
+			s.madeQ = s.madeQ[1:]
+		}
+	}
 	d := s.wl(uid)
 	d.overrides = slices.DeleteFunc(d.overrides, func(x v1.Override) bool { return x.IncidentID == o.IncidentID })
 	d.overrides = append(d.overrides, o)
@@ -452,3 +489,5 @@ func (s *Store) TakeDecisions(uid types.UID) []v1.Decision {
 	d.decisions = nil
 	return out
 }
+
+func hasKey(m map[madeKey]struct{}, k madeKey) bool { _, ok := m[k]; return ok }
