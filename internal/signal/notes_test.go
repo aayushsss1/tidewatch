@@ -1,6 +1,7 @@
 package signal
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,5 +66,16 @@ func TestParseNoteEvents_IgnoresPastAndGarbage(t *testing.T) {
 	// "box" is not a multiplier.
 	if evs := ParseNoteEvents("x4box at 2026-11-26T00:00:00Z, 4 boxes", now); len(evs) != 1 || evs[0].Multiplier != 0 {
 		t.Fatalf("got %+v", evs)
+	}
+}
+
+func TestParseNoteEvents_CapsEvents(t *testing.T) {
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	var b strings.Builder
+	for i := range 80 {
+		b.WriteString(now.Add(time.Duration(i+1)*time.Minute).Format(time.RFC3339) + "\n")
+	}
+	if got := len(ParseNoteEvents(b.String(), now)); got != 50 {
+		t.Fatalf("got %d events", got)
 	}
 }

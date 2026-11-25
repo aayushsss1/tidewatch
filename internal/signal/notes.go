@@ -15,6 +15,8 @@ type NoteEvent struct {
 	Text       string  // the note segment, at most 200 characters
 }
 
+const maxEvents = 50
+
 var (
 	reRFC3339 = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})`)
 	reHHMM    = regexp.MustCompile(`(?:^|[^\d:])([01]?\d|2[0-3]):([0-5]\d)\s+(UTC|[A-Za-z]+(?:/[A-Za-z0-9_+-]+)+)`)
@@ -53,6 +55,9 @@ func ParseNoteEvents(notes string, now time.Time) []NoteEvent {
 		}
 	}
 	slices.SortStableFunc(out, func(a, b NoteEvent) int { return a.At.Compare(b.At) })
+	if len(out) > maxEvents {
+		out = out[:maxEvents]
+	}
 	return out
 }
 

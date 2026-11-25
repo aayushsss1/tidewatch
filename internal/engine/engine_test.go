@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,8 @@ import (
 )
 
 const inc1 = "inc-1"
+
+const busybox = "busybox"
 
 const (
 	testNS   = "default"
@@ -177,7 +180,7 @@ var _ = Describe("Engine", func() {
 				Selector: &metav1.LabelSelector{MatchLabels: labels},
 				Template: corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: labels},
-					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: busybox}}},
 				},
 			},
 		}
@@ -278,6 +281,192 @@ var _ = Describe("Engine", func() {
 			Expect(eng.opts.Triggers).To(BeNil())
 			eng.Step(ctx)
 			Expect(statusOf("breach").Decisions).NotTo(BeEmpty())
+		})
+	})
+
+	Context("trigger detection inputs", func() {
+		var s *sink
+		var reads atomic.Int32
+		var podNames []string
+
+		var cr client.Reader
+
+		enableAgent := func(mut func(*v1.TidePolicy)) {
+			p := &v1.TidePolicy{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: pol}, p)).To(Succeed())
+			p.Spec.Agent.Enabled = true
+			if mut != nil {
+				mut(p)
+			}
+			Expect(k8sClient.Update(ctx, p)).To(Succeed())
+		}
+		trigEngine := func() *Engine {
+			return New(k8sClient, Options{
+				Clock: clk, DefaultTimeToReady: 5 * time.Minute, Triggers: s, APIReader: cr,
+				PromFactory: func(string, time.Duration) (prom.Querier, error) { return q, nil },
+			})
+		}
+		has := func(t signal.Type) bool { return slices.Contains(s.types(), t) }
+		detail := func(t signal.Type) string {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for _, g := range s.got {
+				if g.Type == t {
+					return g.Detail
+				}
+			}
+			return ""
+		}
+		mkPod := func(wl, name string, mut func(*corev1.Pod)) {
+			p := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: name, Labels: map[string]string{"app": wl}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: busybox}}},
+			}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+			podNames = append(podNames, name)
+			if mut != nil {
+				mut(p)
+				Expect(k8sClient.Status().Update(ctx, p)).To(Succeed())
+			}
+		}
+
+		BeforeEach(func() {
+			s = &sink{}
+			podNames = nil
+			reads.Store(0)
+			cr = countingReader{Reader: k8sClient, n: &reads}
+		})
+		AfterEach(func() {
+			for _, n := range podNames {
+				_ = k8sClient.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: n}},
+					client.GracePeriodSeconds(0))
+			}
+			_ = k8sClient.Delete(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "notes-" + pol}})
+		})
+
+		It("raises Anomaly after 3 consecutive steps outside the trusted interval", func() {
+			newPolicy(v1.ModeShadow, nil)
+			newWorkload("anom", 6)
+			e := trigEngine()
+			e.Step(ctx) // first tick: no previous forecast to judge
+			// From now on the real load is wildly above what any model predicted.
+			q.load = func(t time.Time) float64 { return cosine(t) + 500 }
+			for range 5 {
+				clk.Step(testStep)
+				e.Step(ctx)
+			}
+			Expect(has(signal.Anomaly)).To(BeTrue())
+		})
+
+		It("raises WorkloadChange from restarts and OOMKills read from pods", func() {
+			newPolicy(v1.ModeShadow, nil)
+			enableAgent(nil)
+			newWorkload("pods", 2)
+			mkPod("pods", "pods-a", func(p *corev1.Pod) {
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c", Image: busybox, ImageID: "x"}}
+			})
+			e := trigEngine()
+			e.Step(ctx)
+			Expect(has(signal.WorkloadChange)).To(BeFalse())
+
+			clk.Step(testStep)
+			var pod corev1.Pod
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: "pods-a"}, &pod)).To(Succeed())
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: "c", Image: busybox, ImageID: "x", RestartCount: 3,
+			}}
+			Expect(k8sClient.Status().Update(ctx, &pod)).To(Succeed())
+			e.Step(ctx)
+			Expect(has(signal.WorkloadChange)).To(BeTrue())
+			Expect(detail(signal.WorkloadChange)).To(ContainSubstring("3 container restarts"))
+		})
+
+		It("raises WorkloadChange for a recent OOMKill", func() {
+			newPolicy(v1.ModeShadow, nil)
+			enableAgent(nil)
+			newWorkload("oom", 2)
+			mkPod("oom", "oom-a", func(p *corev1.Pod) {
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name: "c", Image: busybox, ImageID: "x", RestartCount: 1,
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						Reason: "OOMKilled", ExitCode: 137, FinishedAt: metav1.NewTime(clk.Now().Add(-time.Minute)),
+					}},
+				}}
+			})
+			trigEngine().Step(ctx)
+			Expect(detail(signal.WorkloadChange)).To(ContainSubstring("OOMKilled"))
+		})
+
+		It("ignores pods when the agent is disabled", func() {
+			newPolicy(v1.ModeShadow, nil)
+			newWorkload("noagent", 2)
+			mkPod("noagent", "noagent-a", func(p *corev1.Pod) {
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+					Name: "c", Image: busybox, ImageID: "x",
+					LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						Reason: "OOMKilled", ExitCode: 137, FinishedAt: metav1.NewTime(clk.Now()),
+					}},
+				}}
+			})
+			trigEngine().Step(ctx)
+			Expect(has(signal.WorkloadChange)).To(BeFalse())
+		})
+
+		It("raises ContextDue from a ConfigMap read once per policy per minute", func() {
+			newPolicy(v1.ModeShadow, nil)
+			cmName := "notes-" + pol
+			enableAgent(func(p *v1.TidePolicy) {
+				p.Spec.Agent.Context.ConfigMapRef = &v1.LocalObjectRef{Name: cmName}
+			})
+			when := clk.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)
+			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: cmName},
+				Data:       map[string]string{"sale": "flash sale at " + when + " expect 3x"},
+			})).To(Succeed())
+			newWorkload("note-a", 2)
+			newWorkload("note-b", 2)
+			e := trigEngine()
+			e.Step(ctx)
+			Expect(has(signal.ContextDue)).To(BeTrue())
+			Expect(reads.Load()).To(Equal(int32(1)))
+		})
+
+		It("skips the notes ConfigMap when no APIReader is configured", func() {
+			newPolicy(v1.ModeShadow, nil)
+			enableAgent(func(p *v1.TidePolicy) {
+				p.Spec.Agent.Context.ConfigMapRef = &v1.LocalObjectRef{Name: "missing"}
+			})
+			newWorkload("note-c", 2)
+			e := trigEngine()
+			e.opts.APIReader = nil
+			e.Step(ctx)
+			Expect(has(signal.ContextDue)).To(BeFalse())
+		})
+
+		It("fires WorkloadChange on an image change but not on a replica change", func() {
+			newPolicy(v1.ModeShadow, nil)
+			newWorkload("tpl", 2)
+			e := trigEngine()
+			e.Step(ctx)
+
+			get := func() *appsv1.Deployment {
+				d := &appsv1.Deployment{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: "tpl"}, d)).To(Succeed())
+				return d
+			}
+			d := get()
+			d.Spec.Replicas = new(int32(3))
+			Expect(k8sClient.Update(ctx, d)).To(Succeed())
+			clk.Step(testStep)
+			e.Step(ctx)
+			Expect(has(signal.WorkloadChange)).To(BeFalse())
+
+			d = get()
+			d.Spec.Template.Spec.Containers[0].Image = "busybox:1.36"
+			Expect(k8sClient.Update(ctx, d)).To(Succeed())
+			clk.Step(testStep)
+			e.Step(ctx)
+			Expect(detail(signal.WorkloadChange)).To(ContainSubstring("template changed"))
 		})
 	})
 
@@ -723,3 +912,14 @@ var _ = Describe("Engine", func() {
 		Expect(statusOf("orphan").Decisions).To(BeEmpty())
 	})
 })
+
+// countingReader counts Get calls on the wrapped reader.
+type countingReader struct {
+	client.Reader
+	n *atomic.Int32
+}
+
+func (c countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	c.n.Add(1)
+	return c.Reader.Get(ctx, key, obj, opts...)
+}

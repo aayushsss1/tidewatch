@@ -47,6 +47,7 @@ type Options struct {
 	PromFactory        func(url string, timeout time.Duration) (prom.Querier, error)
 	Scale              workload.ScaleClient // default workload.NewScaleClient(c)
 	Overrides          *overrides.Store     // nil disables overrides: the engine behaves as in M1
+	APIReader          client.Reader        // uncached reader for ops-note ConfigMaps; nil skips them
 	Triggers           TriggerSink          // nil disables trigger detection entirely
 }
 
@@ -54,6 +55,8 @@ type promEntry struct {
 	q   prom.Querier
 	col *Collector
 }
+
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 
 // Engine is a manager.Runnable that evaluates every TideWorkload each tick.
 type Engine struct {
@@ -63,7 +66,9 @@ type Engine struct {
 	clock clock.Clock
 	ov    *overrides.Store
 
-	debounce *signal.Debouncer
+	debounce   *signal.Debouncer
+	notesMu    sync.Mutex
+	notesCache map[v1.PolicyRef]noteCache
 
 	mu     sync.Mutex
 	states map[types.UID]*wlState
@@ -94,7 +99,7 @@ func New(c client.Client, opts Options) *Engine {
 	return &Engine{
 		c: c, scale: opts.Scale, opts: opts, clock: opts.Clock, ov: opts.Overrides,
 		states: map[types.UID]*wlState{}, proms: map[string]*promEntry{},
-		debounce: signal.NewDebouncer(),
+		debounce: signal.NewDebouncer(), notesCache: map[v1.PolicyRef]noteCache{},
 	}
 }
 

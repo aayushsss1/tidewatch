@@ -17,10 +17,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 	"github.com/aayushsss1/tidewatch/internal/signal"
 )
 
-const podWindow = 5 * time.Minute
+const (
+	podWindow     = 5 * time.Minute
+	notesTTL      = 60 * time.Second
+	notesTimeout  = 2 * time.Second
+	maxNotesBytes = 64 << 10
+)
+
+type noteCache struct {
+	at   time.Time
+	name string
+	text string
+}
 
 // TriggerSink receives the triggers detected in phase 1. Submit is called from
 // the engine's worker goroutines, so implementations must be safe for concurrent use.
@@ -119,7 +131,7 @@ func (e *Engine) templateChanged(it *item) bool {
 // was OOMKilled in that window. List errors are treated as zero.
 func (e *Engine) podSignals(ctx context.Context, it *item, wall time.Time) (int, bool) {
 	sel := it.scale.Selector
-	if sel == "" {
+	if sel == "" || !it.pol.Spec.Agent.Enabled {
 		return 0, false
 	}
 	log := logf.Log.WithName("engine").WithValues("workload", client.ObjectKeyFromObject(it.tw))
@@ -158,7 +170,8 @@ func (e *Engine) podSignals(ctx context.Context, it *item, wall time.Time) (int,
 }
 
 // notes returns the policy's ops notes plus the referenced ConfigMap's values.
-// It is empty unless the agent is enabled.
+// It is empty unless the agent is enabled. The ConfigMap is read through the
+// uncached APIReader (nil skips it), at most once per policy per minute.
 func (e *Engine) notes(ctx context.Context, it *item) string {
 	a := it.pol.Spec.Agent
 	if !a.Enabled {
@@ -168,16 +181,39 @@ func (e *Engine) notes(ctx context.Context, it *item) string {
 	if a.Context.Notes != "" {
 		parts = append(parts, a.Context.Notes)
 	}
-	if ref := a.Context.ConfigMapRef; ref != nil {
-		var cm corev1.ConfigMap
-		key := types.NamespacedName{Namespace: it.pol.Namespace, Name: ref.Name}
-		if err := e.c.Get(ctx, key, &cm); err != nil {
-			logf.Log.WithName("engine").V(1).Info("Getting notes ConfigMap", "configMap", key, "error", err.Error())
-		} else {
-			for _, k := range slices.Sorted(maps.Keys(cm.Data)) {
-				parts = append(parts, cm.Data[k])
-			}
+	if ref := a.Context.ConfigMapRef; ref != nil && e.opts.APIReader != nil {
+		if txt := e.configMapNotes(ctx, it.policyRef(), ref.Name); txt != "" {
+			parts = append(parts, txt)
 		}
 	}
-	return strings.Join(parts, "\n")
+	s := strings.Join(parts, "\n")
+	if len(s) > maxNotesBytes {
+		s = s[:maxNotesBytes]
+	}
+	return s
+}
+
+func (e *Engine) configMapNotes(ctx context.Context, pol v1.PolicyRef, name string) string {
+	e.notesMu.Lock() // also serializes concurrent workers into one read per policy
+	defer e.notesMu.Unlock()
+	now := e.clock.Now()
+	if c, ok := e.notesCache[pol]; ok && c.name == name && now.Sub(c.at) < notesTTL {
+		return c.text
+	}
+	rctx, cancel := context.WithTimeout(ctx, notesTimeout)
+	defer cancel()
+	var cm corev1.ConfigMap
+	key := types.NamespacedName{Namespace: pol.Namespace, Name: name}
+	text := ""
+	if err := e.opts.APIReader.Get(rctx, key, &cm); err != nil {
+		logf.Log.WithName("engine").V(1).Info("Getting notes ConfigMap", "configMap", key, "error", err.Error())
+	} else {
+		vals := make([]string, 0, len(cm.Data))
+		for _, k := range slices.Sorted(maps.Keys(cm.Data)) {
+			vals = append(vals, cm.Data[k])
+		}
+		text = strings.Join(vals, "\n")
+	}
+	e.notesCache[pol] = noteCache{at: now, name: name, text: text}
+	return text
 }
