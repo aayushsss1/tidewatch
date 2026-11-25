@@ -50,6 +50,16 @@ rules:
 - apiGroups:
   - tidewatch.dev
   resources:
+  - tideepisodes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - tidewatch.dev
+  resources:
   - tidepolicies
   - tideworkloads
   verbs:
