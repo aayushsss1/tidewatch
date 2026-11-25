@@ -58,3 +58,21 @@ func TestCounterSamples_MonotonicAndAligned(t *testing.T) {
 		}
 	}
 }
+
+func TestSchedule(t *testing.T) {
+	start := time.Unix(1_700_000_000, 0)
+	for _, n := range []int{0, 1, 7, 300} {
+		s := schedule(start, n)
+		if len(s) != n {
+			t.Fatalf("n=%d len=%d", n, len(s))
+		}
+		for i, at := range s {
+			if at.Before(start) || !at.Before(start.Add(time.Second)) {
+				t.Fatalf("n=%d offset %d out of range", n, i)
+			}
+			if i > 0 && !at.After(s[i-1]) {
+				t.Fatalf("n=%d not strictly increasing at %d", n, i)
+			}
+		}
+	}
+}

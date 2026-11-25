@@ -11,7 +11,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -70,11 +69,9 @@ func runCmd(args []string) error {
 		return err
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
-	sem := make(chan struct{}, 500)
-	var sent, failed atomic.Int64
-	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4000)
+	var sent, failed, dropped atomic.Int64
 	fire := func() {
-		defer wg.Done()
 		defer func() { <-sem }()
 		resp, err := client.Get(*target)
 		if err != nil {
@@ -86,24 +83,31 @@ func runCmd(args []string) error {
 			failed.Add(1)
 		}
 	}
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	for sec := 0; ; sec++ {
-		n := int(math.Round(p.RPS(time.Now())))
-		for i := 0; i < n; i++ {
-			sem <- struct{}{}
-			wg.Add(1)
-			sent.Add(1)
-			go fire()
-			if n > 0 {
-				time.Sleep(time.Second / time.Duration(n+1))
+	for {
+		secStart := time.Now()
+		n := int(math.Round(p.RPS(secStart)))
+		for _, at := range schedule(secStart, n) {
+			time.Sleep(time.Until(at))
+			select {
+			case sem <- struct{}{}:
+				sent.Add(1)
+				go fire()
+			default:
+				dropped.Add(1)
 			}
 		}
-		<-tick.C
-		if sec%10 == 0 {
-			log.Printf("rps=%d sent=%d errors=%d", n, sent.Load(), failed.Load())
-		}
+		time.Sleep(time.Until(secStart.Add(time.Second)))
+		log.Printf("rps=%d sent=%d errors=%d dropped=%d", n, sent.Load(), failed.Load(), dropped.Load())
 	}
+}
+
+// schedule returns n absolute send times evenly spread over [secStart, secStart+1s).
+func schedule(secStart time.Time, n int) []time.Time {
+	out := make([]time.Time, n)
+	for i := range out {
+		out[i] = secStart.Add(time.Duration(i) * time.Second / time.Duration(n))
+	}
+	return out
 }
 
 func seedCmd(args []string) error {
