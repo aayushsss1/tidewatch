@@ -14,7 +14,29 @@ spec:
     singular: tideworkload
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.targetRef.kind
+      name: Kind
+      type: string
+    - jsonPath: .status.currentReplicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.desiredReplicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.forecastPeak
+      name: Peak
+      type: string
+    - jsonPath: .status.trustedModel
+      name: Model
+      type: string
+    - jsonPath: .status.lastAction
+      name: Last-Action
+      type: string
+    - jsonPath: .status.mode
+      name: Mode
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: TideWorkload is the Schema for the tideworkloads API
@@ -37,27 +59,67 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of TideWorkload
+            description: TideWorkloadSpec binds a workload to its policy. It is operator-owned.
             properties:
-              foo:
-                description: foo is an example field of TideWorkload. Edit tideworkload_types.go
-                  to remove/update
-                type: string
+              policyRef:
+                description: PolicyRef points at the TidePolicy governing a workload.
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              targetRef:
+                description: TargetRef points at a scalable workload.
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+            required:
+            - policyRef
+            - targetRef
             type: object
           status:
-            description: status defines the observed state of TideWorkload
+            description: TideWorkloadStatus defines the observed state of TideWorkload.
             properties:
+              accuracy:
+                items:
+                  description: ModelAccuracy is one model's measured accuracy at a
+                    lead time.
+                  properties:
+                    coverage:
+                      type: string
+                    leadSeconds:
+                      format: int32
+                      type: integer
+                    model:
+                      type: string
+                    samples:
+                      format: int32
+                      type: integer
+                    smape:
+                      type: string
+                  required:
+                  - model
+                  type: object
+                type: array
               conditions:
-                description: |-
-                  conditions represent the current state of the TideWorkload resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +178,117 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              currentReplicas:
+                format: int32
+                type: integer
+              decisions:
+                description: Decisions are newest first, at most 5.
+                items:
+                  description: Decision records one scaling decision and what the
+                    enforcer did with it.
+                  properties:
+                    desired:
+                      description: Desired is the replica count before enforcement.
+                      format: int32
+                      type: integer
+                    final:
+                      description: Final is the replica count after enforcement.
+                      format: int32
+                      type: integer
+                    reasons:
+                      description: |-
+                        Reasons lists enforcement reasons, e.g. max_step, cooldown, budget,
+                        external_change, metrics_unavailable.
+                      items:
+                        type: string
+                      type: array
+                    source:
+                      description: DecisionSource says which component produced a
+                        decision.
+                      type: string
+                    time:
+                      format: date-time
+                      type: string
+                    verdict:
+                      description: Verdict is the enforcer's outcome for a decision.
+                      type: string
+                  required:
+                  - desired
+                  - final
+                  - source
+                  - time
+                  - verdict
+                  type: object
+                maxItems: 5
+                type: array
+              desiredReplicas:
+                format: int32
+                type: integer
+              forecastPeak:
+                description: ForecastPeak is the trusted model's point peak over the
+                  horizon.
+                type: string
+              forecasts:
+                items:
+                  description: ModelForecast is one model's forecast summary over
+                    the horizon.
+                  properties:
+                    lower:
+                      type: string
+                    model:
+                      type: string
+                    peak:
+                      type: string
+                    peakTime:
+                      format: date-time
+                      type: string
+                    upper:
+                      type: string
+                  required:
+                  - model
+                  type: object
+                type: array
+              lastAction:
+                description: LastAction is a human-readable summary, e.g. "scale 2→5
+                  (baseline)".
+                type: string
+              lastScaleDownTime:
+                format: date-time
+                type: string
+              lastScaleUpTime:
+                format: date-time
+                type: string
+              load:
+                description: Load is the latest observed load.
+                type: string
+              mode:
+                description: PolicyMode selects whether a policy only records decisions
+                  or enforces them.
+                enum:
+                - Shadow
+                - Active
+                type: string
+              peakTime:
+                format: date-time
+                type: string
+              readyReplicas:
+                format: int32
+                type: integer
+              timeToReady:
+                description: TimeToReadyStatus summarizes observed pod time-to-ready.
+                properties:
+                  p50Seconds:
+                    format: int32
+                    type: integer
+                  p90Seconds:
+                    format: int32
+                    type: integer
+                  samples:
+                    format: int32
+                    type: integer
+                type: object
+              trustedModel:
+                type: string
             type: object
         required:
         - spec

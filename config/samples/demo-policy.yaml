@@ -1,0 +1,29 @@
+apiVersion: tidewatch.dev/v1alpha1
+kind: TidePolicy
+metadata:
+  name: shop
+  namespace: tidewatch-system
+spec:
+  mode: Active
+  prometheus:
+    url: http://prometheus.monitoring.svc:9090
+  selector:
+    namespaces: [shop]
+    kinds:
+      - { apiVersion: apps/v1, kind: Deployment }
+  load:
+    defaultProfile: http
+    profiles:
+      http:
+        query: >-
+          sum(rate(http_requests_total{namespace="{{ .Namespace }}",app="{{ .Name }}"}[1m]))
+        targetPerReplica: "50"
+  forecasting:
+    horizon: 10m
+    history: 1h
+    step: 15s
+    seasonality: 20m
+    accuracyWindow: 1h
+  guardrails:
+    maxReplicas: 10
+    maxTotalReplicas: 25

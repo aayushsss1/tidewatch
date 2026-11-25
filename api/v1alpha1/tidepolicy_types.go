@@ -21,38 +21,138 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // TidePolicySpec defines the desired state of TidePolicy
 type TidePolicySpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of TidePolicy. Edit tidepolicy_types.go to remove/update
+	// +kubebuilder:default=Shadow
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Mode PolicyMode `json:"mode,omitempty"`
+	// +required
+	Prometheus PrometheusSpec `json:"prometheus"`
+	// +required
+	Selector WorkloadSelector `json:"selector"`
+	// +required
+	Load LoadSpec `json:"load"`
+	// +kubebuilder:default={}
+	// +optional
+	Forecasting ForecastingSpec `json:"forecasting,omitzero"`
+	// +required
+	Guardrails GuardrailsSpec `json:"guardrails"`
+}
+
+// PrometheusSpec locates the Prometheus used for load history.
+type PrometheusSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	URL string `json:"url"`
+	// +kubebuilder:default="5s"
+	// +optional
+	Timeout metav1.Duration `json:"timeout,omitzero"`
+}
+
+// WorkloadSelector chooses the workloads a policy governs.
+type WorkloadSelector struct {
+	// +optional
+	Namespaces []string `json:"namespaces,omitempty"`
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	// LabelSelector matches labels on the workloads themselves.
+	metav1.LabelSelector `json:",inline"`
+	// +kubebuilder:validation:MinItems=1
+	Kinds []TargetKind `json:"kinds"`
+}
+
+// LoadSpec describes how load is measured for each workload.
+type LoadSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	DefaultProfile string `json:"defaultProfile"`
+	// +kubebuilder:validation:MinProperties=1
+	Profiles map[string]LoadProfile `json:"profiles"`
+	// +kubebuilder:default="0.8"
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+	// +optional
+	Headroom string `json:"headroom,omitempty"`
+}
+
+// LoadProfile is a named load query and the capacity of one replica.
+type LoadProfile struct {
+	// +kubebuilder:validation:MinLength=1
+	Query string `json:"query"`
+	// +kubebuilder:validation:Pattern=`^[0-9]+(\.[0-9]+)?$`
+	TargetPerReplica string `json:"targetPerReplica"`
+}
+
+// ForecastingSpec configures forecasting.
+type ForecastingSpec struct {
+	// +kubebuilder:default="30m"
+	// +optional
+	Horizon metav1.Duration `json:"horizon,omitzero"`
+	// +kubebuilder:default="168h"
+	// +optional
+	History metav1.Duration `json:"history,omitzero"`
+	// +kubebuilder:default="1m"
+	// +optional
+	Step metav1.Duration `json:"step,omitzero"`
+	// +kubebuilder:default="24h"
+	// +optional
+	Seasonality metav1.Duration `json:"seasonality,omitzero"`
+	// +kubebuilder:default="24h"
+	// +optional
+	AccuracyWindow metav1.Duration `json:"accuracyWindow,omitzero"`
+	// +kubebuilder:default={"holt-winters","seasonal-naive"}
+	// +optional
+	Models []string `json:"models,omitempty"`
+}
+
+// GuardrailsSpec bounds what the operator may do.
+type GuardrailsSpec struct {
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MinReplicas int32 `json:"minReplicas,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	MaxReplicas int32 `json:"maxReplicas"`
+	// MaxTotalReplicas is a budget across all selected workloads.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxTotalReplicas *int32 `json:"maxTotalReplicas,omitempty"`
+	// +kubebuilder:default={}
+	// +optional
+	ScaleUp ScaleUpPolicy `json:"scaleUp,omitzero"`
+	// +kubebuilder:default={}
+	// +optional
+	ScaleDown ScaleDownPolicy `json:"scaleDown,omitzero"`
+}
+
+// ScaleUpPolicy limits scale-up speed.
+type ScaleUpPolicy struct {
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxStep int32 `json:"maxStep,omitempty"`
+	// +kubebuilder:default="60s"
+	// +optional
+	Cooldown metav1.Duration `json:"cooldown,omitzero"`
+}
+
+// ScaleDownPolicy limits scale-down speed.
+type ScaleDownPolicy struct {
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MaxStep int32 `json:"maxStep,omitempty"`
+	// +kubebuilder:default="300s"
+	// +optional
+	Cooldown metav1.Duration `json:"cooldown,omitzero"`
+	// +kubebuilder:default="10m"
+	// +optional
+	StabilizationWindow metav1.Duration `json:"stabilizationWindow,omitzero"`
 }
 
 // TidePolicyStatus defines the observed state of TidePolicy.
 type TidePolicyStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the TidePolicy resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +optional
+	SelectedWorkloads int32 `json:"selectedWorkloads"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,20 +161,20 @@ type TidePolicyStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
+// +kubebuilder:printcolumn:name="Workloads",type=integer,JSONPath=`.status.selectedWorkloads`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // TidePolicy is the Schema for the tidepolicies API
 type TidePolicy struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of TidePolicy
 	// +required
 	Spec TidePolicySpec `json:"spec"`
 
-	// status defines the observed state of TidePolicy
 	// +optional
 	Status TidePolicyStatus `json:"status,omitzero"`
 }

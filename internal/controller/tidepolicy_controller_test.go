@@ -25,8 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	tidewatchv1alpha1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 )
 
@@ -49,13 +47,7 @@ var _ = Describe("TidePolicy Controller", func() {
 			By("creating the custom resource for the Kind TidePolicy")
 			err := k8sClient.Get(ctx, typeNamespacedName, tidepolicy)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &tidewatchv1alpha1.TidePolicy{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
+				resource := minimalPolicy(resourceName)
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
 		})

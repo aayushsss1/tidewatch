@@ -21,38 +21,87 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// TideWorkloadSpec defines the desired state of TideWorkload
+// TideWorkloadSpec binds a workload to its policy. It is operator-owned.
 type TideWorkloadSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// +required
+	PolicyRef PolicyRef `json:"policyRef"`
+	// +required
+	TargetRef TargetRef `json:"targetRef"`
+}
 
-	// foo is an example field of TideWorkload. Edit tideworkload_types.go to remove/update
+// TimeToReadyStatus summarizes observed pod time-to-ready.
+type TimeToReadyStatus struct {
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	P50Seconds int32 `json:"p50Seconds,omitempty"`
+	// +optional
+	P90Seconds int32 `json:"p90Seconds,omitempty"`
+	// +optional
+	Samples int32 `json:"samples,omitempty"`
+}
+
+// ModelForecast is one model's forecast summary over the horizon.
+type ModelForecast struct {
+	Model string `json:"model"`
+	// +optional
+	Peak string `json:"peak,omitempty"`
+	// +optional
+	PeakTime *metav1.Time `json:"peakTime,omitempty"`
+	// +optional
+	Lower string `json:"lower,omitempty"`
+	// +optional
+	Upper string `json:"upper,omitempty"`
+}
+
+// ModelAccuracy is one model's measured accuracy at a lead time.
+type ModelAccuracy struct {
+	Model string `json:"model"`
+	// +optional
+	LeadSeconds int32 `json:"leadSeconds,omitempty"`
+	// +optional
+	SMAPE string `json:"smape,omitempty"`
+	// +optional
+	Coverage string `json:"coverage,omitempty"`
+	// +optional
+	Samples int32 `json:"samples,omitempty"`
 }
 
 // TideWorkloadStatus defines the observed state of TideWorkload.
 type TideWorkloadStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the TideWorkload resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// +optional
+	CurrentReplicas int32 `json:"currentReplicas"`
+	// +optional
+	ReadyReplicas int32 `json:"readyReplicas"`
+	// +optional
+	DesiredReplicas int32 `json:"desiredReplicas"`
+	// +optional
+	Mode PolicyMode `json:"mode,omitempty"`
+	// Load is the latest observed load.
+	// +optional
+	Load string `json:"load,omitempty"`
+	// +optional
+	TrustedModel string `json:"trustedModel,omitempty"`
+	// ForecastPeak is the trusted model's point peak over the horizon.
+	// +optional
+	ForecastPeak string `json:"forecastPeak,omitempty"`
+	// +optional
+	PeakTime *metav1.Time `json:"peakTime,omitempty"`
+	// +optional
+	TimeToReady TimeToReadyStatus `json:"timeToReady,omitzero"`
+	// +optional
+	Forecasts []ModelForecast `json:"forecasts,omitempty"`
+	// +optional
+	Accuracy []ModelAccuracy `json:"accuracy,omitempty"`
+	// Decisions are newest first, at most 5.
+	// +kubebuilder:validation:MaxItems=5
+	// +optional
+	Decisions []Decision `json:"decisions,omitempty"`
+	// LastAction is a human-readable summary, e.g. "scale 2→5 (baseline)".
+	// +optional
+	LastAction string `json:"lastAction,omitempty"`
+	// +optional
+	LastScaleUpTime *metav1.Time `json:"lastScaleUpTime,omitempty"`
+	// +optional
+	LastScaleDownTime *metav1.Time `json:"lastScaleDownTime,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,20 +110,24 @@ type TideWorkloadStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Kind",type=string,JSONPath=`.spec.targetRef.kind`
+// +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.currentReplicas`
+// +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.status.desiredReplicas`
+// +kubebuilder:printcolumn:name="Peak",type=string,JSONPath=`.status.forecastPeak`
+// +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.status.trustedModel`
+// +kubebuilder:printcolumn:name="Last-Action",type=string,JSONPath=`.status.lastAction`
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.status.mode`
 
 // TideWorkload is the Schema for the tideworkloads API
 type TideWorkload struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of TideWorkload
 	// +required
 	Spec TideWorkloadSpec `json:"spec"`
 
-	// status defines the observed state of TideWorkload
 	// +optional
 	Status TideWorkloadStatus `json:"status,omitzero"`
 }

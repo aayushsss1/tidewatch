@@ -14,7 +14,17 @@ spec:
     singular: tidepolicy
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.selectedWorkloads
+      name: Workloads
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: TidePolicy is the Schema for the tidepolicies API
@@ -37,27 +47,264 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of TidePolicy
+            description: TidePolicySpec defines the desired state of TidePolicy
             properties:
-              foo:
-                description: foo is an example field of TidePolicy. Edit tidepolicy_types.go
-                  to remove/update
+              forecasting:
+                default: {}
+                description: ForecastingSpec configures forecasting.
+                properties:
+                  accuracyWindow:
+                    default: 24h
+                    type: string
+                  history:
+                    default: 168h
+                    type: string
+                  horizon:
+                    default: 30m
+                    type: string
+                  models:
+                    default:
+                    - holt-winters
+                    - seasonal-naive
+                    items:
+                      type: string
+                    type: array
+                  seasonality:
+                    default: 24h
+                    type: string
+                  step:
+                    default: 1m
+                    type: string
+                type: object
+              guardrails:
+                description: GuardrailsSpec bounds what the operator may do.
+                properties:
+                  maxReplicas:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxTotalReplicas:
+                    description: MaxTotalReplicas is a budget across all selected
+                      workloads.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    default: 1
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  scaleDown:
+                    default: {}
+                    description: ScaleDownPolicy limits scale-down speed.
+                    properties:
+                      cooldown:
+                        default: 300s
+                        type: string
+                      maxStep:
+                        default: 2
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      stabilizationWindow:
+                        default: 10m
+                        type: string
+                    type: object
+                  scaleUp:
+                    default: {}
+                    description: ScaleUpPolicy limits scale-up speed.
+                    properties:
+                      cooldown:
+                        default: 60s
+                        type: string
+                      maxStep:
+                        default: 5
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                required:
+                - maxReplicas
+                type: object
+              load:
+                description: LoadSpec describes how load is measured for each workload.
+                properties:
+                  defaultProfile:
+                    minLength: 1
+                    type: string
+                  headroom:
+                    default: "0.8"
+                    pattern: ^[0-9]+(\.[0-9]+)?$
+                    type: string
+                  profiles:
+                    additionalProperties:
+                      description: LoadProfile is a named load query and the capacity
+                        of one replica.
+                      properties:
+                        query:
+                          minLength: 1
+                          type: string
+                        targetPerReplica:
+                          pattern: ^[0-9]+(\.[0-9]+)?$
+                          type: string
+                      required:
+                      - query
+                      - targetPerReplica
+                      type: object
+                    minProperties: 1
+                    type: object
+                required:
+                - defaultProfile
+                - profiles
+                type: object
+              mode:
+                default: Shadow
+                description: PolicyMode selects whether a policy only records decisions
+                  or enforces them.
+                enum:
+                - Shadow
+                - Active
                 type: string
+              prometheus:
+                description: PrometheusSpec locates the Prometheus used for load history.
+                properties:
+                  timeout:
+                    default: 5s
+                    type: string
+                  url:
+                    minLength: 1
+                    type: string
+                required:
+                - url
+                type: object
+              selector:
+                description: WorkloadSelector chooses the workloads a policy governs.
+                properties:
+                  kinds:
+                    items:
+                      description: TargetKind identifies a workload kind a policy
+                        may select.
+                      properties:
+                        apiVersion:
+                          minLength: 1
+                          type: string
+                        kind:
+                          minLength: 1
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      type: object
+                    minItems: 1
+                    type: array
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                  namespaceSelector:
+                    description: |-
+                      A label selector is a label query over a set of resources. The result of matchLabels and
+                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                      label selector matches no objects.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  namespaces:
+                    items:
+                      type: string
+                    type: array
+                required:
+                - kinds
+                type: object
+                x-kubernetes-map-type: atomic
+            required:
+            - guardrails
+            - load
+            - prometheus
+            - selector
             type: object
           status:
-            description: status defines the observed state of TidePolicy
+            description: TidePolicyStatus defines the observed state of TidePolicy.
             properties:
               conditions:
-                description: |-
-                  conditions represent the current state of the TidePolicy resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +363,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                format: int64
+                type: integer
+              selectedWorkloads:
+                format: int32
+                type: integer
             type: object
         required:
         - spec
