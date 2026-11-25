@@ -1,0 +1,9 @@
+apiVersion: tidewatch.dev/v1alpha1
+kind: TidePolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: tidewatch
+    app.kubernetes.io/managed-by: kustomize
+  name: tidepolicy-sample
+spec:
+  # TODO(user): Add fields here

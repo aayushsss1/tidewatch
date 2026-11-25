@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- tidewatch_v1alpha1_tidepolicy.yaml
+- tidewatch_v1alpha1_tideworkload.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
