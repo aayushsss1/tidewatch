@@ -21,6 +21,7 @@ const (
 	keyType      = "type"
 	keyWorkload  = "workload"
 	keyMinimum   = "minimum"
+	keyMaximum   = "maximum"
 	workloadDesc = "TideWorkload name in the incident policy"
 )
 

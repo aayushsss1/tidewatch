@@ -36,9 +36,17 @@ type nsVisitor struct{ allowed []string }
 func (v nsVisitor) Visit(n parser.Node, _ []parser.Node) (parser.Visitor, error) {
 	var vs *parser.VectorSelector
 	switch s := n.(type) {
+	case *parser.SubqueryExpr:
+		if s.Range > maxRange || absDur(s.OriginalOffset) > maxRange || absDur(s.Offset) > maxRange {
+			return nil, errors.New("subquery range/offset must be at most 24h")
+		}
+		return v, nil
 	case *parser.VectorSelector:
 		vs = s
 	case *parser.MatrixSelector:
+		if s.Range > maxRange {
+			return nil, errors.New("selector range must be at most 24h")
+		}
 		var ok bool
 		if vs, ok = s.VectorSelector.(*parser.VectorSelector); !ok {
 			return nil, errors.New("unsupported selector")
@@ -46,12 +54,25 @@ func (v nsVisitor) Visit(n parser.Node, _ []parser.Node) (parser.Visitor, error)
 	default:
 		return v, nil
 	}
+	if absDur(vs.OriginalOffset) > maxRange || absDur(vs.Offset) > maxRange {
+		return nil, errors.New("offset must be at most 24h")
+	}
+	if vs.Timestamp != nil || vs.StartOrEnd != 0 {
+		return nil, errors.New("@ modifier is not allowed")
+	}
 	for _, m := range vs.LabelMatchers {
 		if m.Name == "namespace" && m.Type == labels.MatchEqual && slices.Contains(v.allowed, m.Value) {
 			return v, nil
 		}
 	}
 	return nil, errors.New(`every selector needs an equality namespace matcher for an incident namespace`)
+}
+
+func absDur(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func parseDur(name, s string) (time.Duration, error) {

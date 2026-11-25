@@ -233,3 +233,113 @@ func TestParseFinal_RejectsMalformed(t *testing.T) {
 		}
 	}
 }
+
+func TestQueryMetrics_BypassVectors(t *testing.T) {
+	tl := find(t, For(fakeSource{points: 3}, scope), "query_metrics")
+	cases := []struct {
+		q  string
+		ok bool
+	}{
+		{`max_over_time(rate(x[1m])[10m:1m])`, false},
+		{`max_over_time(rate(x{namespace="shop"}[1m])[10m:1m])`, true},
+		{`x{namespace="shop"} offset 1h`, true},
+		{`x{namespace="shop"} offset 48h`, false},
+		{`x{namespace="shop"} offset -48h`, false},
+		{`x{namespace="shop"} offset 1h and y`, false},
+		{`x{namespace="shop"} @ 1000`, false},
+		{`x{namespace="shop"} @ start()`, false},
+		{`label_replace(x, "a", "b", "c", "d")`, false},
+		{`absent(x)`, false},
+		{`absent(x{namespace="shop"})`, true},
+		{`{__name__=~".+"}`, false},
+		{`vector(1)`, true},
+		{`x{namespace="shop",namespace=~".*"}`, true},
+		{`x{namespace="kube-system",namespace="shop"}`, true},
+		{`x{namespace="shop"} + y`, false},
+		{`x{namespace="shop"} + y{namespace="shop"}`, true},
+		{`max_over_time(x{namespace="shop"}[48h:1m])`, false},
+		{`max_over_time(x{namespace="shop"}[1m:1s] offset 48h)`, false},
+		{`rate(x{namespace="shop"}[48h])`, false},
+	}
+	for _, c := range cases {
+		in, _ := json.Marshal(map[string]any{"promql": c.q, "range": "10m", "step": "1m"})
+		_, err := tl.Run(context.Background(), in)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: ok=%v err=%v", c.q, c.ok, err)
+		}
+	}
+}
+
+func TestParseFinal_Bounds(t *testing.T) {
+	ov := func(n int) string {
+		return strings.TrimSuffix(strings.Repeat(`{"workload":"w","minReplicas":1},`, n), ",")
+	}
+	pre := func(n string) string {
+		return `{"overrides":[{"workload":"w","minReplicas":` + n + `}],"reason":"x","confidence":0.5}`
+	}
+	bad := map[string]string{
+		"huge replicas": pre(`2000000000`),
+		"above max":     pre(`10001`),
+		"21 overrides":  `{"overrides":[` + ov(21) + `],"reason":"x","confidence":0.5}`,
+		"6 refs": `{"overrides":[` + ov(1) + `],"reason":"x","confidence":0.5,` +
+			`"episodeRefs":["a","b","c","d","e","f"]}`,
+		"missing conf":   `{"overrides":[` + ov(1) + `],"reason":"x"}`,
+		"overflow int32": pre(`99999999999`),
+	}
+	for n, in := range bad {
+		if _, _, err := ParseFinal(call("propose_scaling", in)); err == nil {
+			t.Errorf("%s accepted", n)
+		}
+	}
+	if _, _, err := ParseFinal(call("no_action", `{"reason":"x"}`)); err == nil {
+		t.Error("no_action missing confidence accepted")
+	}
+	okIn := `{"overrides":[{"workload":"w","minReplicas":10000}],"reason":"` +
+		strings.Repeat("é", 1500) + `","confidence":0}`
+	p, _, err := ParseFinal(call("propose_scaling", okIn))
+	if err != nil || len([]rune(p.Reason)) != 1000 || p.Confidence != 0 {
+		t.Fatalf("%v %v", p, err)
+	}
+	twenty := `{"overrides":[` + ov(20) + `],"reason":"x","confidence":1}`
+	if _, _, err := ParseFinal(call("propose_scaling", twenty)); err != nil {
+		t.Errorf("20 overrides rejected: %v", err)
+	}
+	var s struct {
+		Properties struct {
+			Overrides struct {
+				Items struct {
+					Properties struct {
+						Min struct{ Maximum float64 } `json:"minReplicas"`
+					}
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal(For(fakeSource{}, scope)[10].Def().InputSchema, &s); err != nil ||
+		s.Properties.Overrides.Items.Properties.Min.Maximum != MaxProposedReplicas {
+		t.Errorf("schema max: %+v %v", s, err)
+	}
+}
+
+type bigSource struct{ fakeSource }
+
+func (bigSource) SimilarEpisodes(context.Context, WorkloadRef) ([]EpisodeSummary, error) {
+	out := make([]EpisodeSummary, 10)
+	for i := range out {
+		out[i] = EpisodeSummary{Name: "e", Score: 1, Summary: strings.Repeat("s", 1000)}
+	}
+	return out, nil
+}
+
+func TestTools_CapQueryMetricsAndSimilarEpisodes(t *testing.T) {
+	ts := For(bigSource{fakeSource{points: 5000}}, scope)
+	out, err := find(t, ts, "query_metrics").Run(context.Background(),
+		json.RawMessage(`{"promql":"x{namespace=\"shop\"}","range":"24h","step":"15s"}`))
+	if err != nil || len(out) > 4096 || !json.Valid([]byte(out)) {
+		t.Fatalf("metrics len=%d err=%v", len(out), err)
+	}
+	out, err = find(t, ts, "find_similar_episodes").Run(context.Background(), json.RawMessage(`{}`))
+	if err != nil || len(out) > 4096 || !json.Valid([]byte(out)) {
+		t.Fatalf("episodes len=%d err=%v", len(out), err)
+	}
+}

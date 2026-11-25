@@ -10,6 +10,21 @@ import (
 	"github.com/aayushsss1/tidewatch/pkg/llm"
 )
 
+// Proposal bounds enforced by ParseFinal.
+const (
+	MaxProposedReplicas = 10000
+	maxOverrides        = 20
+	maxReasonRunes      = 1000
+	maxEpisodeRefs      = 5
+)
+
+func capRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
 // Proposal is a validated propose_scaling call.
 type Proposal struct {
 	Overrides    []ProposedOverride
@@ -42,13 +57,13 @@ func terminal(name, desc string, props map[string]any, req ...string) llm.Tool {
 }
 
 func proposeTool() llm.Tool {
-	num01 := map[string]any{keyType: "number", keyMinimum: 0, "maximum": 1}
+	num01 := map[string]any{keyType: "number", keyMinimum: 0, keyMaximum: 1}
 	return terminal("propose_scaling", "Terminal. Propose scale-up overrides for in-scope workloads.", map[string]any{
 		"overrides": map[string]any{keyType: "array", "items": map[string]any{
 			keyType: "object",
 			"properties": map[string]any{
 				keyWorkload:   str("TideWorkload name"),
-				"minReplicas": map[string]any{keyType: "integer", keyMinimum: 0},
+				"minReplicas": map[string]any{keyType: "integer", keyMinimum: 0, keyMaximum: MaxProposedReplicas},
 				"start":       str("RFC3339; optional, defaults to now"),
 				"end":         str("RFC3339"),
 			},
@@ -64,15 +79,18 @@ func proposeTool() llm.Tool {
 func noActionTool() llm.Tool {
 	return terminal("no_action", "Terminal. Conclude that no scaling action is needed.", map[string]any{
 		"reason":     str("why"),
-		"confidence": map[string]any{keyType: "number", keyMinimum: 0, "maximum": 1},
+		"confidence": map[string]any{keyType: "number", keyMinimum: 0, keyMaximum: 1},
 	}, "reason", "confidence")
 }
 
-func checkCommon(reason string, conf float64) error {
+func checkCommon(reason string, confidence *float64) error {
 	if reason == "" {
 		return errors.New("reason is required")
 	}
-	if !(conf >= 0 && conf <= 1) {
+	if confidence == nil {
+		return errors.New("confidence is required")
+	}
+	if conf := *confidence; !(conf >= 0 && conf <= 1) {
 		return errors.New("confidence must be within 0..1")
 	}
 	return nil
@@ -83,8 +101,8 @@ func ParseFinal(call llm.ToolCall) (p *Proposal, noAction *NoAction, err error) 
 	switch call.Name {
 	case "no_action":
 		var a struct {
-			Reason     string  `json:"reason"`
-			Confidence float64 `json:"confidence"`
+			Reason     string   `json:"reason"`
+			Confidence *float64 `json:"confidence"`
 		}
 		if err := json.Unmarshal(call.Input, &a); err != nil {
 			return nil, nil, fmt.Errorf("invalid no_action input: %w", err)
@@ -92,7 +110,9 @@ func ParseFinal(call llm.ToolCall) (p *Proposal, noAction *NoAction, err error) 
 		if err := checkCommon(a.Reason, a.Confidence); err != nil {
 			return nil, nil, err
 		}
-		return nil, &NoAction{Reason: a.Reason, Confidence: a.Confidence}, nil
+		return nil, &NoAction{
+			Reason: capRunes(a.Reason, maxReasonRunes), Confidence: *a.Confidence,
+		}, nil
 	case "propose_scaling":
 		var a struct {
 			Overrides []struct {
@@ -102,7 +122,7 @@ func ParseFinal(call llm.ToolCall) (p *Proposal, noAction *NoAction, err error) 
 				End         *time.Time `json:"end"`
 			} `json:"overrides"`
 			Reason       string   `json:"reason"`
-			Confidence   float64  `json:"confidence"`
+			Confidence   *float64 `json:"confidence"`
 			TrustedModel string   `json:"trustedModel"`
 			EpisodeRefs  []string `json:"episodeRefs"`
 		}
@@ -115,13 +135,25 @@ func ParseFinal(call llm.ToolCall) (p *Proposal, noAction *NoAction, err error) 
 		if len(a.Overrides) == 0 {
 			return nil, nil, errors.New("at least one override is required")
 		}
-		out := &Proposal{Reason: a.Reason, Confidence: a.Confidence, TrustedModel: a.TrustedModel, EpisodeRefs: a.EpisodeRefs}
+		if len(a.Overrides) > maxOverrides {
+			return nil, nil, fmt.Errorf("at most %d overrides", maxOverrides)
+		}
+		if len(a.EpisodeRefs) > maxEpisodeRefs {
+			return nil, nil, fmt.Errorf("at most %d episodeRefs", maxEpisodeRefs)
+		}
+		out := &Proposal{
+			Reason: capRunes(a.Reason, maxReasonRunes), Confidence: *a.Confidence,
+			TrustedModel: a.TrustedModel, EpisodeRefs: a.EpisodeRefs,
+		}
 		for i, o := range a.Overrides {
 			if o.Workload == "" {
 				return nil, nil, fmt.Errorf("override %d: workload is required", i)
 			}
 			if o.MinReplicas < 0 {
 				return nil, nil, fmt.Errorf("override %d: minReplicas must be >= 0", i)
+			}
+			if o.MinReplicas > MaxProposedReplicas {
+				return nil, nil, fmt.Errorf("override %d: minReplicas must be <= %d", i, MaxProposedReplicas)
 			}
 			po := ProposedOverride{Workload: o.Workload, MinReplicas: o.MinReplicas}
 			if o.Start != nil {
