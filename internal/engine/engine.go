@@ -280,7 +280,10 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		e.unavailable(it, reasonInvalidConfig, err.Error())
 		return it
 	}
-	it.cfg = cfg
+	it.cfg, it.cfgOK = cfg, true
+	if len(cfg.Warnings) > 0 {
+		log.V(1).Info("Ignored annotations", "warnings", cfg.Warnings)
+	}
 	pe, err := e.querier(pol.Spec.Prometheus.URL, pol.Spec.Prometheus.Timeout.Duration)
 	if err != nil {
 		e.unavailable(it, reasonMetricsUnavailable, err.Error())

@@ -90,6 +90,20 @@ var _ = Describe("CRD validation", func() {
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
 		Expect(err.Error()).To(ContainSubstring("mode"))
 	})
+	It("rejects forecasting history/step above the Prometheus point limit", func() {
+		p := minimalPolicy("too-many-points")
+		p.Spec.Forecasting.History = metav1.Duration{Duration: 168 * time.Hour}
+		p.Spec.Forecasting.Step = metav1.Duration{Duration: 30 * time.Second} // 20160 points
+		err := k8sClient.Create(ctx, p)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "got: %v", err)
+		Expect(err.Error()).To(ContainSubstring("11000"))
+	})
+	It("accepts forecasting history/step at the Prometheus point limit", func() {
+		p := minimalPolicy("max-points")
+		p.Spec.Forecasting.History = metav1.Duration{Duration: 11000 * time.Minute}
+		p.Spec.Forecasting.Step = metav1.Duration{Duration: time.Minute}
+		Expect(k8sClient.Create(ctx, p)).To(Succeed())
+	})
 	It("allows minReplicas 0", func() {
 		p := minimalPolicy("min-zero")
 		p.Spec.Guardrails.MinReplicas = new(int32(0))

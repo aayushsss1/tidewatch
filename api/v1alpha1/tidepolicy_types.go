@@ -81,6 +81,7 @@ type LoadProfile struct {
 }
 
 // ForecastingSpec configures forecasting.
+// +kubebuilder:validation:XValidation:rule="!has(self.history) || !has(self.step) || (duration(self.step).getSeconds() > 0 && duration(self.history).getSeconds() / duration(self.step).getSeconds() <= 11000)",message="history/step must be at most 11000 points (Prometheus range query limit)"
 type ForecastingSpec struct {
 	// +kubebuilder:default="30m"
 	// +optional

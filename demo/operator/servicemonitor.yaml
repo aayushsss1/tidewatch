@@ -17,3 +17,4 @@ spec:
       path: /metrics
       scheme: http
       interval: 15s
+      honorLabels: true # keep the metrics' own namespace label (the workload's), not the scrape target's

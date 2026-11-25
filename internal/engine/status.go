@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -57,7 +59,29 @@ func conditionsChanged(it *item) bool {
 		old := meta.FindStatusCondition(it.tw.Status.Conditions, c.Type)
 		return old == nil || old.Status != c.Status || old.Reason != c.Reason
 	}
+	if it.cfgOK && func() bool {
+		c := it.annotationsCondition()
+		old := meta.FindStatusCondition(it.tw.Status.Conditions, c.Type)
+		return old == nil || old.Status != c.Status || old.Message != c.Message
+	}() {
+		return true
+	}
 	return (it.forecasting.Type != "" && differs(it.forecasting)) || (it.enforce && differs(it.budgetCondition()))
+}
+
+// decisionChanged reports whether d differs from the newest stored decision in
+// verdict, final replicas or reasons, so periodic refreshes do not add duplicates.
+func decisionChanged(prev, d v1.Decision) bool {
+	return prev.Verdict != d.Verdict || prev.Final != d.Final || !slices.Equal(prev.Reasons, d.Reasons)
+}
+
+func (it *item) annotationsCondition() metav1.Condition {
+	c := metav1.Condition{Type: v1.CondAnnotationsIgnored, Status: metav1.ConditionFalse, Reason: "none"}
+	if len(it.cfg.Warnings) > 0 {
+		c.Status, c.Reason = metav1.ConditionTrue, "annotations_ignored"
+		c.Message = strings.Join(it.cfg.Warnings, "; ")
+	}
+	return c
 }
 
 func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
@@ -65,9 +89,11 @@ func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
 	s.CurrentReplicas, s.ReadyReplicas, s.DesiredReplicas = it.scale.Replicas, it.scale.Ready, d.Desired
 	s.Mode = it.pol.Spec.Mode
 	s.TimeToReady = st.ttr.Status()
-	s.Decisions = append([]v1.Decision{d}, s.Decisions...)
-	if len(s.Decisions) > maxDecisions {
-		s.Decisions = s.Decisions[:maxDecisions]
+	if len(s.Decisions) == 0 || decisionChanged(s.Decisions[0], d) {
+		s.Decisions = append([]v1.Decision{d}, s.Decisions...)
+		if len(s.Decisions) > maxDecisions {
+			s.Decisions = s.Decisions[:maxDecisions]
+		}
 	}
 	if d.Final != it.scale.Replicas {
 		verb := "scale"
@@ -86,6 +112,9 @@ func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
 
 	if it.forecasting.Type != "" {
 		meta.SetStatusCondition(&s.Conditions, it.forecasting)
+	}
+	if it.cfgOK {
+		meta.SetStatusCondition(&s.Conditions, it.annotationsCondition())
 	}
 	if it.enforce {
 		meta.SetStatusCondition(&s.Conditions, it.budgetCondition())

@@ -91,11 +91,12 @@ type Decision struct {
 
 // Condition types and annotation/label keys.
 const (
-	CondForecasting   = "Forecasting"
-	CondConflict      = "Conflict"
-	CondPaused        = "Paused"
-	CondBudgetLimited = "BudgetLimited"
-	CondReady         = "Ready"
+	CondForecasting        = "Forecasting"
+	CondConflict           = "Conflict"
+	CondPaused             = "Paused"
+	CondBudgetLimited      = "BudgetLimited"
+	CondAnnotationsIgnored = "AnnotationsIgnored"
+	CondReady              = "Ready"
 
 	AnnoPaused       = "tidewatch.dev/paused"
 	AnnoMinReplicas  = "tidewatch.dev/min-replicas"

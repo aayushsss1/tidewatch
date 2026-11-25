@@ -59,6 +59,7 @@ type item struct {
 	now           time.Time // step-aligned
 	step, horizon time.Duration
 	cfg           workload.EffectiveConfig
+	cfgOK         bool // cfg was resolved, so its annotation warnings are meaningful
 	scale         workload.ScaleState
 	actual        float64
 

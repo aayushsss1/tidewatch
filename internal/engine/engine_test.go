@@ -287,7 +287,7 @@ var _ = Describe("Engine", func() {
 			newWorkload("restart-cd", 6)
 			tw := &v1.TideWorkload{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: "restart-cd"}, tw)).To(Succeed())
-			tw.Status.LastScaleDownTime = ptr.To(metav1.NewTime(clk.Now().Add(-10 * time.Second)))
+			tw.Status.LastScaleDownTime = new(metav1.NewTime(clk.Now().Add(-10 * time.Second)))
 			Expect(k8sClient.Status().Update(ctx, tw)).To(Succeed())
 			eng.Step(ctx)
 
