@@ -68,7 +68,7 @@ type Engine struct {
 
 	debounce   *signal.Debouncer
 	notesMu    sync.Mutex
-	notesCache map[v1.PolicyRef]noteCache
+	notesCache map[v1.PolicyRef]*notesEntry
 
 	mu     sync.Mutex
 	states map[types.UID]*wlState
@@ -99,7 +99,7 @@ func New(c client.Client, opts Options) *Engine {
 	return &Engine{
 		c: c, scale: opts.Scale, opts: opts, clock: opts.Clock, ov: opts.Overrides,
 		states: map[types.UID]*wlState{}, proms: map[string]*promEntry{},
-		debounce: signal.NewDebouncer(), notesCache: map[v1.PolicyRef]noteCache{},
+		debounce: signal.NewDebouncer(), notesCache: map[v1.PolicyRef]*notesEntry{},
 	}
 }
 

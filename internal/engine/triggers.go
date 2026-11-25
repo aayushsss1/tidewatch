@@ -8,7 +8,9 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -27,12 +29,6 @@ const (
 	notesTimeout  = 2 * time.Second
 	maxNotesBytes = 64 << 10
 )
-
-type noteCache struct {
-	at   time.Time
-	name string
-	text string
-}
 
 // TriggerSink receives the triggers detected in phase 1. Submit is called from
 // the engine's worker goroutines, so implementations must be safe for concurrent use.
@@ -188,17 +184,43 @@ func (e *Engine) notes(ctx context.Context, it *item) string {
 	}
 	s := strings.Join(parts, "\n")
 	if len(s) > maxNotesBytes {
-		s = s[:maxNotesBytes]
+		n := maxNotesBytes
+		for n > 0 && !utf8.RuneStart(s[n]) { // never split a UTF-8 sequence
+			n--
+		}
+		s = s[:n]
 	}
 	return s
 }
 
-func (e *Engine) configMapNotes(ctx context.Context, pol v1.PolicyRef, name string) string {
-	e.notesMu.Lock() // also serializes concurrent workers into one read per policy
+// notesEntry is one policy's cached notes. Its own mutex single-flights the
+// read, so a slow API server blocks only workloads of that policy.
+type notesEntry struct {
+	mu   sync.Mutex
+	at   time.Time
+	name string
+	text string
+	ok   bool
+}
+
+func (e *Engine) notesEntryFor(pol v1.PolicyRef) *notesEntry {
+	e.notesMu.Lock() // guards the map only; never held during a read
 	defer e.notesMu.Unlock()
+	en := e.notesCache[pol]
+	if en == nil {
+		en = &notesEntry{}
+		e.notesCache[pol] = en
+	}
+	return en
+}
+
+func (e *Engine) configMapNotes(ctx context.Context, pol v1.PolicyRef, name string) string {
+	en := e.notesEntryFor(pol)
+	en.mu.Lock()
+	defer en.mu.Unlock()
 	now := e.clock.Now()
-	if c, ok := e.notesCache[pol]; ok && c.name == name && now.Sub(c.at) < notesTTL {
-		return c.text
+	if en.ok && en.name == name && now.Sub(en.at) < notesTTL {
+		return en.text
 	}
 	rctx, cancel := context.WithTimeout(ctx, notesTimeout)
 	defer cancel()
@@ -214,6 +236,6 @@ func (e *Engine) configMapNotes(ctx context.Context, pol v1.PolicyRef, name stri
 		}
 		text = strings.Join(vals, "\n")
 	}
-	e.notesCache[pol] = noteCache{at: now, name: name, text: text}
+	en.at, en.name, en.text, en.ok = now, name, text, true
 	return text
 }
