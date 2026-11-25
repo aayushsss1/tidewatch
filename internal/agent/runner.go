@@ -406,7 +406,7 @@ func (r *Runner) view(inc *Incident) (*episodes.IncidentView, bool) {
 	}
 	series, _ := r.eng.Series(inc.Lead)
 	v := &episodes.IncidentView{
-		ID: inc.ID, Policy: ref, Lead: lead.Workload.Name, Start: inc.Opened, End: inc.LastTrigger,
+		ID: inc.ID, Policy: ref, Lead: lead.Workload.Name, LeadNamespace: lead.Workload.Namespace, Start: inc.Opened, End: inc.LastTrigger,
 		LeadSeries: series,
 	}
 	if v.End.Before(v.Start) {

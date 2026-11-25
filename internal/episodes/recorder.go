@@ -32,6 +32,7 @@ type IncidentView struct {
 	ID               string
 	Policy           v1.PolicyRef
 	Lead             string
+	LeadNamespace    string // where the episode is written; defaults to the policy's namespace
 	Members          []v1.EpisodeMember
 	Start, End, Peak time.Time
 	LeadSeries       forecast.Series
@@ -84,10 +85,14 @@ func (r *Recorder) Build(inc *IncidentView) *v1.TideEpisode {
 	if n := len(inc.LeadSeries.Points); n > 1 {
 		cov = int32(inc.LeadSeries.Points[n-1].T.Sub(inc.LeadSeries.Points[0].T).Hours())
 	}
+	ns := inc.LeadNamespace
+	if ns == "" {
+		ns = inc.Policy.Namespace
+	}
 	return &v1.TideEpisode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      episodeName(inc),
-			Namespace: inc.Policy.Namespace,
+			Namespace: ns,
 			Labels: map[string]string{
 				v1.LabelPolicy: inc.Policy.Namespace + "." + inc.Policy.Name,
 				LabelLead:      leadLabel(inc.Lead),

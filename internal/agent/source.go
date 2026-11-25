@@ -40,9 +40,11 @@ const (
 // +kubebuilder:rbac:groups=apps,resources=replicasets;controllerrevisions,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch
 
-// EpisodeFinder returns past episodes similar to the current situation of w.
-// A nil EpisodeFinder means there are none.
-type EpisodeFinder func(ctx context.Context, w tools.WorkloadRef) ([]tools.EpisodeSummary, error)
+// EpisodeFinder returns past episodes similar to the current situation of w,
+// searching the policy's namespace and memberNamespaces (those of the
+// incident's members, where episodes are recorded). A nil EpisodeFinder means
+// there are none.
+type EpisodeFinder func(ctx context.Context, w tools.WorkloadRef, memberNamespaces []string) ([]tools.EpisodeSummary, error)
 
 // PromFactory builds a Prometheus querier for a policy's URL.
 type PromFactory func(url string, timeout time.Duration) (prom.Querier, error)
@@ -422,7 +424,11 @@ func (s *source) SimilarEpisodes(ctx context.Context, w tools.WorkloadRef) ([]to
 	if s.episodes == nil {
 		return nil, nil
 	}
-	return s.episodes(ctx, w)
+	nss := make([]string, 0, len(s.members))
+	for ref := range s.members {
+		nss = append(nss, ref.Namespace)
+	}
+	return s.episodes(ctx, w, nss)
 }
 
 func (s *source) querier() (prom.Querier, error) {

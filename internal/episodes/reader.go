@@ -3,6 +3,7 @@ package episodes
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -45,14 +46,19 @@ func (r *Reader) Similar(ctx context.Context, policy string, namespaces []string
 }
 
 // Finder adapts a Reader to the agent's EpisodeFinder type. policyOf resolves
-// the policy, namespaces and current query for a workload; ok=false means no
-// episodes are available for it.
-func Finder(r *Reader, policyOf func(tools.WorkloadRef) (policy string, namespaces []string, q Query, ok bool)) func(ctx context.Context, w tools.WorkloadRef) ([]tools.EpisodeSummary, error) {
-	return func(ctx context.Context, w tools.WorkloadRef) ([]tools.EpisodeSummary, error) {
+// the policy, its namespaces and the current query for a workload; ok=false
+// means no episodes are available for it. Episodes live in their lead
+// workload's namespace, so the search covers the namespaces policyOf returns
+// plus memberNamespaces, the namespaces of the incident's members.
+func Finder(
+	r *Reader, policyOf func(tools.WorkloadRef) (policy string, namespaces []string, q Query, ok bool),
+) func(ctx context.Context, w tools.WorkloadRef, memberNamespaces []string) ([]tools.EpisodeSummary, error) {
+	return func(ctx context.Context, w tools.WorkloadRef, memberNamespaces []string) ([]tools.EpisodeSummary, error) {
 		policy, nss, q, ok := policyOf(w)
 		if !ok {
 			return nil, nil
 		}
+		nss = slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(nss), memberNamespaces...))))
 		ms, err := r.Similar(ctx, policy, nss, q, 3, 0.5)
 		if err != nil {
 			return nil, err

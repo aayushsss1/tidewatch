@@ -35,8 +35,9 @@ func view(id string, start time.Time) *IncidentView {
 	return &IncidentView{
 		ID: id, Policy: v1.PolicyRef{Namespace: "rec", Name: "pol"}, Lead: leadName,
 		Start: start, Peak: start.Add(10 * time.Minute), End: start.Add(30 * time.Minute),
-		LeadSeries: rampSeries(60, func(i int) float64 { return float64(i + 1) }),
-		PeakRatio:  4.8, ProposalApplied: true, Action: "prescaled",
+		LeadNamespace: ns1,
+		LeadSeries:    rampSeries(60, func(i int) float64 { return float64(i + 1) }),
+		PeakRatio:     4.8, ProposalApplied: true, Action: "prescaled",
 	}
 }
 
@@ -58,12 +59,13 @@ var _ = Describe("Recorder", func() {
 		Expect(r.Notable(&IncidentView{MaxReplicaChange: 0.5})).To(BeFalse())
 		Expect(r.Notable(&IncidentView{MaxReplicaChange: 0.51})).To(BeTrue())
 
-		oldManual := manual("old-manual", "rec", "rec.pol", leadName, t0.Add(-1000*time.Hour))
+		oldManual := manual("old-manual", ns1, "rec.pol", leadName, t0.Add(-1000*time.Hour))
 		Expect(k8sClient.Create(ctx(), oldManual)).To(Succeed())
 
 		var first string
 		for i := range 52 {
 			ep := r.Build(view(fmt.Sprintf("inc-%d", i), t0.Add(time.Duration(i)*time.Hour)))
+			Expect(ep.Namespace).To(Equal(ns1), "episodes live in the lead workload's namespace")
 			Expect(ep.Name).To(MatchRegexp(`^web-front-2026\d{8}-[0-9a-f]{6}$`))
 			Expect(len(ep.Name)).To(BeNumerically("<=", 63))
 			Expect(ep.Labels).To(HaveKeyWithValue(v1.LabelPolicy, "rec.pol"))
@@ -74,7 +76,7 @@ var _ = Describe("Recorder", func() {
 			Expect(r.Record(ctx(), ep)).To(Succeed())
 		}
 		var list v1.TideEpisodeList
-		Expect(k8sClient.List(ctx(), &list, client.InNamespace("rec"))).To(Succeed())
+		Expect(k8sClient.List(ctx(), &list, client.InNamespace(ns1), client.MatchingLabels{v1.LabelPolicy: "rec.pol"})).To(Succeed())
 		recorded, names := 0, map[string]bool{}
 		for _, e := range list.Items {
 			names[e.Name] = true
@@ -121,11 +123,24 @@ var _ = Describe("Reader", func() {
 		find := Finder(rd, func(w tools.WorkloadRef) (string, []string, Query, bool) {
 			return "rd1.p", []string{ns1, ns2}, q, w.Name == "lead"
 		})
-		sums, err := find(ctx(), tools.WorkloadRef{Namespace: ns1, Name: "lead"})
+		sums, err := find(ctx(), tools.WorkloadRef{Namespace: ns1, Name: "lead"}, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(sums).To(HaveLen(3))
-		none, _ := find(ctx(), tools.WorkloadRef{Name: "x"})
+		none, _ := find(ctx(), tools.WorkloadRef{Name: "x"}, nil)
 		Expect(none).To(BeEmpty())
+	})
+
+	It("finds an episode in a member's namespace while the policy lives elsewhere", func() {
+		// Like the demo seed: the episode sits in the workload namespace, the policy elsewhere.
+		Expect(k8sClient.Create(ctx(), manual("in-lead-ns", ns2, "rec.polx", "lead", t0))).To(Succeed())
+		q := Query{Weekday: time.Friday, Hour: 9}
+		find := Finder(&Reader{R: k8sClient}, func(tools.WorkloadRef) (string, []string, Query, bool) {
+			return "rec.polx", []string{"rec"}, q, true // the policy namespace only
+		})
+		sums, err := find(ctx(), tools.WorkloadRef{Namespace: ns2, Name: "lead"}, []string{ns2})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sums).To(HaveLen(1))
+		Expect(sums[0].Name).To(Equal("in-lead-ns"))
 	})
 })
 
