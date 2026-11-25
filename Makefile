@@ -63,6 +63,12 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+##@ Plugin
+
+.PHONY: build-plugin
+build-plugin: ## Build the kubectl-tidewatch plugin.
+	go build -o bin/kubectl-tidewatch ./cmd/kubectl-tidewatch
+
 ##@ Demo
 
 # The demo is also the e2e test: hack/demo.sh builds a kind cluster named "tidewatch" and the
