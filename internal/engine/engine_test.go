@@ -18,9 +18,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
+	"github.com/aayushsss1/tidewatch/internal/overrides"
 	"github.com/aayushsss1/tidewatch/internal/workload"
 	"github.com/aayushsss1/tidewatch/pkg/forecast"
 	"github.com/aayushsss1/tidewatch/pkg/prom"
@@ -357,6 +359,177 @@ var _ = Describe("Engine", func() {
 			eng.Step(ctx)
 
 			Expect(replicasOf("gappy-high")).To(BeNumerically(">", 6))
+		})
+	})
+
+	Context("with an override store", func() {
+		var store *overrides.Store
+
+		BeforeEach(func() {
+			q.load = func(time.Time) float64 { return 10 } // baseline wants 2 replicas
+			store = overrides.NewStore()
+			eng = New(k8sClient, Options{
+				Clock: clk, Overrides: store, DefaultTimeToReady: 5 * time.Minute,
+				PromFactory: func(string, time.Duration) (prom.Querier, error) { return q, nil },
+			})
+		})
+
+		override := func(incident string, minReplicas int32) v1.Override {
+			return v1.Override{
+				ID: "ov-" + incident, IncidentID: incident, MinReplicas: minReplicas,
+				Start: metav1.NewTime(trough.Add(-time.Minute)), End: metav1.NewTime(trough.Add(time.Hour)),
+			}
+		}
+		uidOf := func(name string) types.UID {
+			tw := &v1.TideWorkload{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: name}, tw)).To(Succeed())
+			return tw.UID
+		}
+		annotate := func(name, key, val string) {
+			tw := &v1.TideWorkload{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: name}, tw)).To(Succeed())
+			orig := tw.DeepCopy()
+			if tw.Annotations == nil {
+				tw.Annotations = map[string]string{}
+			}
+			tw.Annotations[key] = val
+			Expect(k8sClient.Patch(ctx, tw, client.MergeFrom(orig))).To(Succeed())
+		}
+		annotationsOf := func(name string) map[string]string {
+			tw := &v1.TideWorkload{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: name}, tw)).To(Succeed())
+			return tw.Annotations
+		}
+		pending := func(incident string, minReplicas int32, expires time.Time) v1.PendingApproval {
+			return v1.PendingApproval{
+				IncidentID: incident, Override: override(incident, minReplicas),
+				Confidence: "0.9", Expires: metav1.NewTime(expires),
+			}
+		}
+
+		It("lifts replicas to an active override but never lowers below the baseline", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("lift", 2)
+			Expect(store.AddOverride(uidOf("lift"), override("inc-1", 6))).To(Succeed())
+			eng.Step(ctx)
+
+			Expect(replicasOf("lift")).To(Equal(int32(6)))
+			st := statusOf("lift")
+			Expect(st.Decisions[0].Source).To(Equal(v1.SourceAgent))
+			Expect(st.Decisions[0].IncidentID).To(Equal("inc-1"))
+			Expect(st.Decisions[0].Desired).To(Equal(int32(6)))
+
+			// A floor below what the baseline wants changes nothing.
+			q.load = func(time.Time) float64 { return 80 } // baseline wants 10
+			newWorkload("nolower", 8)
+			Expect(store.AddOverride(uidOf("nolower"), override("inc-2", 3))).To(Succeed())
+			eng.Step(ctx)
+			Expect(replicasOf("nolower")).To(Equal(int32(10)))
+			Expect(statusOf("nolower").Decisions[0].Source).To(Equal(v1.SourceBaseline))
+			Expect(statusOf("nolower").Decisions[0].IncidentID).To(BeEmpty())
+		})
+
+		It("still runs the enforcer on an override (maxReplicas clamps it)", func() {
+			newPolicy(v1.ModeActive, nil) // maxReplicas 50
+			newWorkload("clamped", 48)
+			Expect(store.AddOverride(uidOf("clamped"), override("inc-1", 80))).To(Succeed())
+			eng.Step(ctx)
+
+			Expect(replicasOf("clamped")).To(Equal(int32(50)))
+			Expect(statusOf("clamped").Decisions[0].Verdict).To(Equal(v1.VerdictClamped))
+		})
+
+		It("consumes an approve annotation, applies the override, and removes the annotation", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("approve", 2)
+			Expect(store.AddPending(uidOf("approve"), pending("inc-1", 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
+			annotate("approve", v1.AnnoApprove, "inc-1@alice")
+			eng.Step(ctx)
+
+			Expect(replicasOf("approve")).To(Equal(int32(6)))
+			st := statusOf("approve")
+			Expect(st.Overrides).To(HaveLen(1))
+			Expect(st.Overrides[0].ApprovedBy).To(Equal("alice"))
+			Expect(st.PendingApprovals).To(BeEmpty())
+			Expect(annotationsOf("approve")).NotTo(HaveKey(v1.AnnoApprove))
+			verdicts := []v1.Verdict{}
+			for _, d := range st.Decisions {
+				if d.Source == v1.SourceAgent && d.IncidentID == "inc-1" {
+					verdicts = append(verdicts, d.Verdict)
+				}
+			}
+			Expect(verdicts).To(ContainElement(v1.VerdictApplied))
+		})
+
+		It("defaults the approver to kubectl and consumes reject annotations", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("kc", 2)
+			newWorkload("rej", 2)
+			Expect(store.AddPending(uidOf("kc"), pending("inc-1", 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
+			Expect(store.AddPending(uidOf("rej"), pending("inc-2", 6, trough.Add(10*time.Minute)))).Error().NotTo(HaveOccurred())
+			annotate("kc", v1.AnnoApprove, "inc-1")
+			annotate("rej", v1.AnnoReject, "inc-2@bob")
+			eng.Step(ctx)
+
+			Expect(statusOf("kc").Overrides[0].ApprovedBy).To(Equal("kubectl"))
+			st := statusOf("rej")
+			Expect(st.Overrides).To(BeEmpty())
+			Expect(st.PendingApprovals).To(BeEmpty())
+			verdicts := make([]v1.Verdict, 0, len(st.Decisions))
+			for _, d := range st.Decisions {
+				verdicts = append(verdicts, d.Verdict)
+			}
+			Expect(verdicts).To(ContainElement(v1.VerdictRejected))
+			Expect(replicasOf("rej")).To(Equal(int32(2)))
+			Expect(annotationsOf("rej")).NotTo(HaveKey(v1.AnnoReject))
+		})
+
+		It("ignores an approve annotation for an expired approval and records verdict expired", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("expired", 2)
+			Expect(store.AddPending(uidOf("expired"), pending("inc-1", 6, trough.Add(-time.Minute)))).Error().NotTo(HaveOccurred())
+			annotate("expired", v1.AnnoApprove, "inc-1@alice")
+			eng.Step(ctx)
+
+			Expect(replicasOf("expired")).To(Equal(int32(2)))
+			st := statusOf("expired")
+			Expect(st.Overrides).To(BeEmpty())
+			Expect(st.PendingApprovals).To(BeEmpty())
+			found := false
+			for _, d := range st.Decisions {
+				found = found || (d.Verdict == v1.VerdictExpired && d.IncidentID == "inc-1")
+			}
+			Expect(found).To(BeTrue())
+			Expect(annotationsOf("expired")).NotTo(HaveKey(v1.AnnoApprove))
+		})
+
+		It("restores overrides and pending approvals from status on a fresh engine", func() {
+			newPolicy(v1.ModeActive, nil)
+			newWorkload("restored", 2)
+			tw := &v1.TideWorkload{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: testNS, Name: "restored"}, tw)).To(Succeed())
+			tw.Status.Overrides = []v1.Override{override("inc-1", 6)}
+			tw.Status.PendingApprovals = []v1.PendingApproval{pending("inc-2", 8, trough.Add(10*time.Minute))}
+			Expect(k8sClient.Status().Update(ctx, tw)).To(Succeed())
+			eng.Step(ctx) // store is empty before this step: everything comes from status
+
+			Expect(replicasOf("restored")).To(Equal(int32(6)))
+			st := statusOf("restored")
+			Expect(st.Overrides).To(HaveLen(1))
+			Expect(st.PendingApprovals).To(HaveLen(1))
+			Expect(st.PendingApprovals[0].IncidentID).To(Equal("inc-2"))
+		})
+
+		It("writes baselineReplicas and overrides to status", func() {
+			newPolicy(v1.ModeShadow, nil)
+			newWorkload("persist", 2)
+			Expect(store.AddOverride(uidOf("persist"), override("inc-1", 6))).To(Succeed())
+			eng.Step(ctx)
+
+			st := statusOf("persist")
+			Expect(st.BaselineReplicas).To(Equal(int32(2)))
+			Expect(st.Overrides).To(HaveLen(1))
+			Expect(st.Overrides[0].MinReplicas).To(Equal(int32(6)))
 		})
 	})
 

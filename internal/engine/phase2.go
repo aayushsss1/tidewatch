@@ -68,6 +68,9 @@ func (e *Engine) decide(ctx context.Context, it *item, others int32) {
 		},
 	})
 	it.decision, it.budget = res.Decision, res.BudgetLimited
+	if it.override != nil {
+		it.decision.Source, it.decision.IncidentID = v1.SourceAgent, it.override.IncidentID
+	}
 
 	st.recs = append(st.recs, TimedReplicas{T: it.now, Replicas: it.base.Desired})
 	cutoff := it.now.Add(-rails.ScaleDown.StabilizationWindow.Duration)

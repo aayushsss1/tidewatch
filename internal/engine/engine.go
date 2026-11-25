@@ -21,6 +21,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
+	"github.com/aayushsss1/tidewatch/internal/overrides"
 	"github.com/aayushsss1/tidewatch/internal/workload"
 	"github.com/aayushsss1/tidewatch/pkg/forecast"
 	"github.com/aayushsss1/tidewatch/pkg/prom"
@@ -44,6 +45,7 @@ type Options struct {
 	Clock              clock.Clock
 	PromFactory        func(url string, timeout time.Duration) (prom.Querier, error)
 	Scale              workload.ScaleClient // default workload.NewScaleClient(c)
+	Overrides          *overrides.Store     // nil disables overrides: the engine behaves as in M1
 }
 
 type promEntry struct {
@@ -57,6 +59,7 @@ type Engine struct {
 	scale workload.ScaleClient
 	opts  Options
 	clock clock.Clock
+	ov    *overrides.Store
 
 	mu     sync.Mutex
 	states map[types.UID]*wlState
@@ -85,7 +88,7 @@ func New(c client.Client, opts Options) *Engine {
 	}
 	registerMetrics()
 	return &Engine{
-		c: c, scale: opts.Scale, opts: opts, clock: opts.Clock,
+		c: c, scale: opts.Scale, opts: opts, clock: opts.Clock, ov: opts.Overrides,
 		states: map[types.UID]*wlState{}, proms: map[string]*promEntry{},
 	}
 }
@@ -123,6 +126,7 @@ func (e *Engine) Step(ctx context.Context) {
 		return
 	}
 	e.prune(&list)
+	e.syncOverrides(&list)
 
 	results := make([]*item, len(list.Items))
 	jobs := make(chan int)
@@ -159,6 +163,13 @@ func (e *Engine) prune(list *v1.TideWorkloadList) {
 	live := make(map[types.UID]struct{}, len(list.Items))
 	for i := range list.Items {
 		live[list.Items[i].UID] = struct{}{}
+	}
+	if e.ov != nil {
+		for _, uid := range e.ov.Known() {
+			if _, ok := live[uid]; !ok {
+				e.ov.Forget(uid)
+			}
+		}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -273,6 +284,8 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		now: wall.Truncate(step), actual: math.NaN(),
 	}
 	defer func() { it.dur = time.Since(started) }()
+	it.events, st.events = st.events, nil
+	e.consumeAnnotations(ctx, it)
 	st.ttr.Observe(it.now, scale.Ready)
 
 	cfg, err := workload.Effective(pol.Spec, pol.Annotations[v1.AnnoPaused] == "true", target.Object, target.Ref.Kind)
@@ -327,6 +340,7 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		e.unavailable(it, reasonNoData, "load series has no data")
 		return it
 	}
+	e.applyOverride(it)
 	it.enforce = true
 	e.recordPhase1Metrics(it)
 	return it

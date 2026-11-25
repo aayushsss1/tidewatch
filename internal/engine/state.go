@@ -43,6 +43,8 @@ type wlState struct {
 	lastAligned time.Time // step-aligned time of the last Record/Observe
 	replicas    int32     // last known replica count, for policy budgets
 
+	events []v1.Decision // approval, rejection and expiry decisions awaiting a status write
+
 	statusWritten bool
 	lastStatus    time.Time
 	lastVerdict   v1.Verdict
@@ -72,7 +74,11 @@ type item struct {
 	budget      bool
 	decision    v1.Decision
 	enforce     bool // phase 2 should run Enforce
-	dur         time.Duration
+
+	events           []v1.Decision // extra decisions for this tick, oldest first
+	baselineReplicas int32         // Desired before any override
+	override         *v1.Override  // the override that raised Desired, if any
+	dur              time.Duration
 }
 
 func (i *item) policyRef() v1.PolicyRef { return i.tw.Spec.PolicyRef }

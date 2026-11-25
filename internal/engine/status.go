@@ -22,7 +22,8 @@ import (
 func (e *Engine) writeStatus(ctx context.Context, it *item) {
 	st, d := it.st, it.decision
 	now := e.clock.Now()
-	if st.statusWritten && st.lastVerdict == d.Verdict && st.lastFinal == d.Final &&
+	dirty := e.ov != nil && e.ov.TakeDirty(it.tw.UID)
+	if !dirty && len(it.events) == 0 && st.statusWritten && st.lastVerdict == d.Verdict && st.lastFinal == d.Final &&
 		now.Sub(st.lastStatus) < statusRefresh && !conditionsChanged(it) {
 		return
 	}
@@ -39,6 +40,9 @@ func (e *Engine) writeStatus(ctx context.Context, it *item) {
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			logf.Log.WithName("engine").Error(err, "Writing status", "workload", key)
+		}
+		if dirty {
+			e.ov.MarkDirty(it.tw.UID)
 		}
 		return
 	}
@@ -72,7 +76,7 @@ func conditionsChanged(it *item) bool {
 // decisionChanged reports whether d differs from the newest stored decision in
 // verdict, final replicas or reasons, so periodic refreshes do not add duplicates.
 func decisionChanged(prev, d v1.Decision) bool {
-	return prev.Verdict != d.Verdict || prev.Final != d.Final || !slices.Equal(prev.Reasons, d.Reasons)
+	return prev.Verdict != d.Verdict || prev.Source != d.Source || prev.Final != d.Final || !slices.Equal(prev.Reasons, d.Reasons)
 }
 
 func (it *item) annotationsCondition() metav1.Condition {
@@ -89,11 +93,14 @@ func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
 	s.CurrentReplicas, s.ReadyReplicas, s.DesiredReplicas = it.scale.Replicas, it.scale.Ready, d.Desired
 	s.Mode = it.pol.Spec.Mode
 	s.TimeToReady = st.ttr.Status()
+	for _, ev := range it.events {
+		s.Decisions = append([]v1.Decision{ev}, s.Decisions...)
+	}
 	if len(s.Decisions) == 0 || decisionChanged(s.Decisions[0], d) {
 		s.Decisions = append([]v1.Decision{d}, s.Decisions...)
-		if len(s.Decisions) > maxDecisions {
-			s.Decisions = s.Decisions[:maxDecisions]
-		}
+	}
+	if len(s.Decisions) > maxDecisions {
+		s.Decisions = s.Decisions[:maxDecisions]
 	}
 	if d.Final != it.scale.Replicas {
 		verb := "scale"
@@ -115,6 +122,12 @@ func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
 	}
 	if it.cfgOK {
 		meta.SetStatusCondition(&s.Conditions, it.annotationsCondition())
+	}
+	if e.ov != nil {
+		s.Overrides, s.PendingApprovals, s.RecentOutcomes = e.ov.Snapshot(it.tw.UID)
+		if it.enforce {
+			s.BaselineReplicas = it.baselineReplicas
+		}
 	}
 	if it.enforce {
 		meta.SetStatusCondition(&s.Conditions, it.budgetCondition())
