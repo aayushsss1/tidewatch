@@ -22,7 +22,9 @@ func target(name string) workload.Target {
 func newC(seed int64, jitter float64) (*SimCluster, *clocktesting.FakeClock) {
 	clk := clocktesting.NewFakeClock(t0)
 	c := New(seed, clk)
-	c.AddWorkload("ns", "a", WorkloadSpec{CapacityRPS: 10, StartupDelay: Delay{Mean: time.Minute, Jitter: jitter}, Initial: 2})
+	c.AddWorkload("ns", "a", WorkloadSpec{
+		CapacityRPS: 10, StartupDelay: Delay{Mean: time.Minute, Jitter: jitter}, Initial: 2,
+	})
 	return c, clk
 }
 
@@ -125,7 +127,7 @@ func TestAccountOverride(t *testing.T) {
 func run(seed int64) []time.Time {
 	c, clk := newC(seed, 0)
 	_ = c.SetReplicas("ns", "a", 12)
-	var out []time.Time
+	out := make([]time.Time, 0, 120)
 	for range 120 {
 		st, _ := c.State("ns", "a")
 		_ = st
@@ -159,15 +161,13 @@ func TestConcurrent(t *testing.T) {
 	c, clk := newC(1, 0)
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := range 200 {
 				_ = c.Set(context.Background(), target("a"), int32(1+(i+j)%10))
 				_, _ = c.Get(context.Background(), target("a"))
 				c.Account(clk.Now(), time.Minute, map[Key]float64{{"ns", "a"}: 10})
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

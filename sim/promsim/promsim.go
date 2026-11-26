@@ -75,7 +75,9 @@ func AppLabelKey(q string) (string, bool) {
 }
 
 // RangeSeries implements prom.Querier.
-func (s *Sim) RangeSeries(_ context.Context, q string, start, end time.Time, step time.Duration) (forecast.Series, error) {
+func (s *Sim) RangeSeries(
+	_ context.Context, q string, start, end time.Time, step time.Duration,
+) (forecast.Series, error) {
 	n := 0
 	if step > 0 {
 		n = max(int(end.Sub(start)/step)+1, 0)

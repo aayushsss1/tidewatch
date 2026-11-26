@@ -46,7 +46,8 @@ func TestAlignedValuesMatchScenario(t *testing.T) {
 	s, sc, clk := setup(t)
 	want := sc.Series("frontend") // default epoch; values depend only on offset
 	end := clk.Now()
-	got, err := s.RangeSeries(context.Background(), `sum(rate(http_requests_total{namespace="shop",app="frontend"}[1m]))`, end.Add(-10*time.Minute), end, time.Minute)
+	q := `sum(rate(http_requests_total{namespace="shop",app="frontend"}[1m]))`
+	got, err := s.RangeSeries(context.Background(), q, end.Add(-10*time.Minute), end, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,8 @@ func TestAlignedValuesMatchScenario(t *testing.T) {
 func TestFutureIsNaN(t *testing.T) {
 	s, _, clk := setup(t)
 	now := clk.Now()
-	got, _ := s.RangeSeries(context.Background(), `x{app="frontend"}`, now.Add(-2*time.Minute), now.Add(3*time.Minute), time.Minute)
+	got, _ := s.RangeSeries(
+		context.Background(), `x{app="frontend"}`, now.Add(-2*time.Minute), now.Add(3*time.Minute), time.Minute)
 	for i, p := range got.Points {
 		if p.T.After(now) != math.IsNaN(p.V) {
 			t.Fatalf("point %d (%v) v=%v", i, p.T, p.V)

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -145,12 +145,15 @@ func (w *wl) setReplicas(n int32, now time.Time) {
 	if int32(len(w.pods)) > n {
 		// Remove unready pods first, then the newest ready pods: sort so the ones to keep
 		// come first (ready before unready; among ready, oldest first).
-		sort.SliceStable(w.pods, func(i, j int) bool {
-			ri, rj := !w.pods[i].readyAt.After(now), !w.pods[j].readyAt.After(now)
-			if ri != rj {
-				return ri
+		slices.SortStableFunc(w.pods, func(a, b pod) int {
+			ra, rb := !a.readyAt.After(now), !b.readyAt.After(now)
+			if ra != rb {
+				if ra {
+					return -1
+				}
+				return 1
 			}
-			return w.pods[i].readyAt.Before(w.pods[j].readyAt)
+			return a.readyAt.Compare(b.readyAt)
 		})
 		w.pods = w.pods[:n]
 	}
