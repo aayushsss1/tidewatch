@@ -317,6 +317,9 @@ func (s *Scenario) validateEventsAndNotes() error {
 		if strings.TrimSpace(n.Text) == "" {
 			return fmt.Errorf("notes[%d]: text is required", i)
 		}
+		if _, err := RenderNote(n.Text, DefaultEpoch); err != nil {
+			return fmt.Errorf("notes[%d]: %w", i, err)
+		}
 	}
 	return nil
 }
@@ -442,11 +445,17 @@ func (s *Scenario) Series(workload string) forecast.Series {
 	return trace.Sample(src, s.Epoch, s.Start-s.History, s.Start+s.Duration, s.Step)
 }
 
-// Notes returns the ops notes sorted by PublishAt (stable for equal times). The result is a copy.
+// Notes returns the ops notes, templates rendered against Epoch (see RenderNote), sorted by PublishAt (stable for equal times). The result is a copy.
 func (s *Scenario) Notes() []Note {
 	out := make([]Note, len(s.NoteSpecs))
 	for i, n := range s.NoteSpecs {
-		out[i] = Note{PublishAt: s.Epoch.Add(n.PublishAt), Text: n.Text}
+		// Render once, here, so Tidewatch and the controller baselines get identical text.
+		// validate has already proved the template renders, so the error cannot occur.
+		text, err := RenderNote(n.Text, s.Epoch)
+		if err != nil {
+			text = n.Text
+		}
+		out[i] = Note{PublishAt: s.Epoch.Add(n.PublishAt), Text: text}
 	}
 	slices.SortStableFunc(out, func(a, b Note) int { return a.PublishAt.Compare(b.PublishAt) })
 	return out

@@ -88,7 +88,10 @@ func TestParseNoteMatchesAgentParser(t *testing.T) {
 			if d, err := time.ParseDuration(n.PublishAt); err == nil {
 				pub = epoch.Add(d)
 			}
-			text := n.Text
+			text, err := scenario.RenderNote(n.Text, epoch)
+			if err != nil {
+				t.Fatalf("%s note %d: %v", f, i, err)
+			}
 			got, ok := ParseNote(text, pub)
 			var want *signal.NoteEvent
 			for _, ev := range signal.ParseNoteEvents(text, pub) {
