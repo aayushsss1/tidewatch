@@ -58,3 +58,37 @@ func TestFillStatus_AnnotationsIgnoredCondition(t *testing.T) {
 		}
 	}
 }
+
+func TestFillStatus_LastInvestigationSurvivesLaterDecisions(t *testing.T) {
+	e := &Engine{}
+	var s v1.TideWorkloadStatus
+	inv := v1.Decision{
+		Time: metav1.NewTime(t0), Source: v1.SourceAgent, IncidentID: "inc-1", Verdict: v1.VerdictApplied,
+		PromptVersion: "m2.2", Trace: []v1.TraceEntry{{Tool: "query_range"}},
+	}
+	it := statusItem(v1.Decision{Time: metav1.NewTime(t0), Verdict: v1.VerdictHeld, Final: 2})
+	it.events = []v1.Decision{
+		{Time: metav1.NewTime(t0), Source: v1.SourceAgent, PromptVersion: "m2.1", IncidentID: "old"},
+		inv,
+		{Time: metav1.NewTime(t0), Source: v1.SourceAgent, IncidentID: "inc-1", Verdict: v1.VerdictExpired}, // no prompt version
+	}
+	e.fillStatus(&s, it)
+	if s.LastInvestigation == nil || s.LastInvestigation.IncidentID != "inc-1" || s.LastInvestigation.PromptVersion != "m2.2" {
+		t.Fatalf("LastInvestigation = %+v", s.LastInvestigation)
+	}
+
+	// Enough engine decisions to push the investigation out of Decisions.
+	for i := range 2 * maxDecisions {
+		d := v1.Decision{Time: metav1.NewTime(t0.Add(time.Duration(i+1) * time.Minute)), Verdict: v1.VerdictApplied, Final: int32(3 + i)}
+		e.fillStatus(&s, statusItem(d))
+	}
+	for _, d := range s.Decisions {
+		if d.PromptVersion != "" {
+			t.Fatal("the investigation should have rotated out of Decisions")
+		}
+	}
+	if s.LastInvestigation == nil || s.LastInvestigation.IncidentID != "inc-1" ||
+		s.LastInvestigation.PromptVersion != "m2.2" || len(s.LastInvestigation.Trace) != 1 {
+		t.Fatalf("LastInvestigation lost: %+v", s.LastInvestigation)
+	}
+}

@@ -751,6 +751,11 @@ func (in *TideWorkloadStatus) DeepCopyInto(out *TideWorkloadStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.LastInvestigation != nil {
+		in, out := &in.LastInvestigation, &out.LastInvestigation
+		*out = new(Decision)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Overrides != nil {
 		in, out := &in.Overrides, &out.Overrides
 		*out = make([]Override, len(*in))

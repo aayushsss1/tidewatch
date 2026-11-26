@@ -305,6 +305,87 @@ spec:
                 description: LastAction is a human-readable summary, e.g. "scale 2→5
                   (baseline)".
                 type: string
+              lastInvestigation:
+                description: |-
+                  LastInvestigation is the newest decision of the LLM investigator, kept
+                  after it rotates out of Decisions so its trace stays auditable.
+                properties:
+                  desired:
+                    description: Desired is the replica count before enforcement.
+                    format: int32
+                    type: integer
+                  final:
+                    description: Final is the replica count after enforcement.
+                    format: int32
+                    type: integer
+                  incidentId:
+                    type: string
+                  model:
+                    type: string
+                  outcome:
+                    description: Outcome is the retrospective score of an agent decision.
+                    properties:
+                      needed:
+                        type: boolean
+                      scoredAt:
+                        format: date-time
+                        type: string
+                      timely:
+                        description: Timely is nil until it can be judged.
+                        type: boolean
+                      wastedReplicaMinutes:
+                        pattern: ^[0-9]+(\.[0-9]+)?$
+                        type: string
+                    required:
+                    - scoredAt
+                    type: object
+                  promptVersion:
+                    type: string
+                  provider:
+                    type: string
+                  reasons:
+                    description: |-
+                      Reasons lists enforcement reasons, e.g. max_step, cooldown, budget,
+                      external_change, metrics_unavailable.
+                    items:
+                      type: string
+                    type: array
+                  source:
+                    description: DecisionSource says which component produced a decision.
+                    type: string
+                  time:
+                    format: date-time
+                    type: string
+                  trace:
+                    items:
+                      description: TraceEntry records one agent tool call.
+                      properties:
+                        args:
+                          maxLength: 200
+                          type: string
+                        latencyMs:
+                          format: int32
+                          type: integer
+                        resultBytes:
+                          format: int32
+                          type: integer
+                        tool:
+                          type: string
+                      required:
+                      - tool
+                      type: object
+                    maxItems: 8
+                    type: array
+                  verdict:
+                    description: Verdict is the enforcer's outcome for a decision.
+                    type: string
+                required:
+                - desired
+                - final
+                - source
+                - time
+                - verdict
+                type: object
               lastScaleDownTime:
                 format: date-time
                 type: string

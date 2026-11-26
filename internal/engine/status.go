@@ -97,6 +97,9 @@ func (e *Engine) fillStatus(s *v1.TideWorkloadStatus, it *item) {
 	s.TimeToReady = st.ttr.Status()
 	for _, ev := range it.events {
 		s.Decisions = append([]v1.Decision{ev}, s.Decisions...)
+		if ev.PromptVersion != "" { // events are oldest first, so the newest wins
+			s.LastInvestigation = ev.DeepCopy()
+		}
 	}
 	if len(s.Decisions) == 0 || decisionChanged(s.Decisions[0], d) {
 		s.Decisions = append([]v1.Decision{d}, s.Decisions...)

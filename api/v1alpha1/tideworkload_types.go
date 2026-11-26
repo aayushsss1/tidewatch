@@ -95,6 +95,10 @@ type TideWorkloadStatus struct {
 	// +kubebuilder:validation:MaxItems=5
 	// +optional
 	Decisions []Decision `json:"decisions,omitempty"`
+	// LastInvestigation is the newest decision of the LLM investigator, kept
+	// after it rotates out of Decisions so its trace stays auditable.
+	// +optional
+	LastInvestigation *Decision `json:"lastInvestigation,omitempty"`
 	// +kubebuilder:validation:MaxItems=3
 	// +optional
 	Overrides []Override `json:"overrides,omitempty"`
