@@ -41,9 +41,9 @@ Evaluated every step, per workload:
 | config | what it is |
 |---|---|
 | `hpa` | The Kubernetes HPA algorithm: target utilization 0.8, tolerance 0.1, 300s scale-down stabilization, default scale-up policy (100% or 4 pods per 15s, whichever is larger), same min and max as the Tidewatch policy. |
-| `keda-prometheus` | KEDA's Prometheus scaler driving an HPA on request rate with an `AverageValue` target of capacity x 0.8 per pod. KEDA polls every 30s; the metric is a 1-minute trailing average (the lag of `rate(...[1m])`); the HPA syncs every 15s with the HPA defaults. `cooldownPeriod` only matters for scale-to-zero and every scenario has `minReplicas >= 1`, so it is not modelled. |
+| `keda-prometheus` | KEDA's Prometheus scaler driving an HPA on request rate with an `AverageValue` target of capacity x 0.8 per pod. KEDA polls every 30s; the metric is a 1-minute trailing average (the lag of `rate(...[1m])`); the HPA syncs every 15s with the HPA defaults. At the 1-minute step it behaves like `hpa`: a 1-minute trailing average plus the 30s poll feeds the same HPA math (same target, tolerance, policies and stabilization) with the same metric, so the two produce the same replicas. `cooldownPeriod` only matters for scale-to-zero and every scenario has `minReplicas >= 1`, so it is not modelled. |
 | `keda-cron` | KEDA Cron plus the Prometheus scaler, modelling a human who reads the ops note. A note that parses as "expect ~Nx" at a time opens a window from event minus 15 minutes to event plus 60 minutes with `desiredReplicas = ceil(N x pre-event daily peak / (capacity x 0.8))`. KEDA takes the max across triggers. The note is followed literally, including wrong or adversarial ones. The window opens a fixed 15 minutes ahead regardless of pod startup time. |
-| `tidewatch-baseline` | The real engine with the agent disabled: forecasting plus guardrails. |
+| `tidewatch-baseline` | The real engine with the agent disabled: forecasting plus guardrails. It sizes for `max(reactive, forecast upper bound over the next time-to-ready plus margin)`, so it carries forecast-driven headroom and over-provisions more than HPA (see `internal/engine/baseline.go`). |
 | `regex-rule` | `tidewatch-baseline` plus a deterministic override that parses the note for a multiplier and a time. From event minus time-to-ready minus a margin to event plus 30 minutes it sets the floor to `ceil(N x currentLoad / (capacity x headroom))` on every workload in the policy. It goes through the same override store and engine, so the guardrails apply. It knows the measured startup time; the cron human does not. |
 | `tidewatch-agent` | The real engine plus the LLM agent (default model `claude-haiku-5-5`). |
 | `oracle` | Perfect foresight: `ceil(max load over [t, t + startup + margin] / (capacity x headroom))`, clamped to the bounds and ignoring cooldowns. An upper bound, not a real controller. |
@@ -158,10 +158,10 @@ targets set them up.
 
    ```
    read -s ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY
-   make bench MATRIX=sim/matrices/headline.yaml OUT=bin/bench BENCH_FLAGS="--max-usd 25 --resume"
+   make bench MATRIX=sim/matrices/headline.yaml OUT=bin/bench BENCH_FLAGS="--max-usd 5 --resume"
    ```
 
-   `--resume` skips runs already in `results.csv`. Pass `--guardrails both` in `BENCH_FLAGS` to
+   `--max-usd 5` is the recommended spend limit (see the cost estimate); `--resume` skips runs already in `results.csv`. Pass `--guardrails both` in `BENCH_FLAGS` to
    also run the `default` profile (the default is `matched` only). The non-agent configs need
    no key: run them with `bin/tidewatch-bench run --provider scripted --config hpa,keda-prometheus,...`
    after `make build-bench`, with `KUBEBUILDER_ASSETS` set as in the Makefile.
@@ -182,12 +182,13 @@ targets set them up.
 
 The headline matrix has 38 scenarios and the agent repeats 5 times: 190 agent runs on
 `claude-haiku-5-5` for the `matched` profile (380 with `--guardrails both`). Each investigation
-is capped at 30,000 tokens and 8 tool calls, and the agent has an hourly budget of 200,000
-tokens counted on the simulated clock, so a 6-hour run is capped at 1.2M tokens. At the price
-table in `cmd/tidewatch-bench/price.go` (USD 0.10 per million input tokens, 0.50 per million
-output) that cap is about USD 0.12 per run, so at most about USD 23 for 190 runs. Runs are typically a few investigations, far below the cap; the
-runner prints each run's estimated cost and `--max-usd` stops before a run once spend exceeds the limit. The
-`usd` column is an estimate from list prices, not a bill.
+is capped at 30,000 tokens and 8 tool calls, and the agent has an hourly token budget of
+200,000 counted on the simulated clock, so a 6-hour run is bounded at 1.2M tokens. That is a
+token bound, not a dollar cap. At the price table in `cmd/tidewatch-bench/price.go` (USD 0.10
+per million input tokens, 0.50 per million output), 1.2M all-input tokens is about USD 0.12 per
+run and 1.2M all-output tokens about USD 0.60 per run, so the worst case for 190 runs is about
+USD 23 to USD 114. The real spend limit is `--max-usd`: the runner stops before a run once the
+estimated spend would exceed it. The `usd` column is an estimate from list prices, not a bill.
 
 ## Data licensing
 

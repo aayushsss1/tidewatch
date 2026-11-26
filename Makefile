@@ -105,7 +105,8 @@ REPORT_OUT ?= $(OUT)/report
 .PHONY: bench-report
 bench-report: ## Render a benchmark report: make bench-report CSV=bin/bench/results.csv OUT=docs/benchmarks/<run-name> (needs python3).
 	@test -x "$(BENCH_VENV)/bin/python" || python3 -m venv "$(BENCH_VENV)"
-	@"$(BENCH_VENV)/bin/pip" install -q -r scripts/bench/requirements.txt
+	@if [ ! -f "$(BENCH_VENV)/.stamp" ] || [ scripts/bench/requirements.txt -nt "$(BENCH_VENV)/.stamp" ]; then \
+		"$(BENCH_VENV)/bin/pip" install -q -r scripts/bench/requirements.txt && touch "$(BENCH_VENV)/.stamp"; fi
 	"$(BENCH_VENV)/bin/python" scripts/bench/report.py "$(CSV)" --out "$(if $(filter command line,$(origin OUT)),$(OUT),$(REPORT_OUT))"
 
 ##@ Plugin

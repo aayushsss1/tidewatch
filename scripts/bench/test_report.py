@@ -49,7 +49,8 @@ def test_percentages_and_extra(runs):
     assert h["regex-rule"]["extra_rm"] == 280 - 150
     a = h["tidewatch-agent"]  # per-repeat breach totals 10 and 6 -> median 8
     assert a["breach"] == 8 and a["repeats"] == 2 and a["prevented_pct"] == pytest.approx(100 * 32 / 40)
-    assert a["usd_per_run"] == pytest.approx((0.02 + 0.01 + 0.01) / 3)
+    assert a["usd_per_run"] == pytest.approx(0.015)  # event scenarios only
+    assert a["b_usd_per_run"] == pytest.approx(0.01)
 
 
 def test_share_underprov_le(runs):
@@ -63,6 +64,7 @@ def test_b_section_flags_never_below(runs):
     assert b[("b-adversarial", "tidewatch-agent")]["never_below_baseline"] is True
     assert b[("b-adversarial", "regex-rule")]["overprov_delta"] == 260
     assert b[("b-adversarial", "keda-cron")]["overprov_delta"] == 460
+    assert b[("b-adversarial", "keda-cron")]["never_below_baseline"] is None
 
 
 def test_safety_flags_nonzero(runs):
@@ -87,3 +89,5 @@ def test_full_report_writes_everything(tmp_path):
     md = (tmp_path / "summary.md").read_text()
     assert "Paired deltas" in md and "WARNING" not in md
     assert len(list(tmp_path.glob("*.png"))) == 6  # 3 figures x 2 profiles
+    pc = pd.read_csv(tmp_path / "paired_tidewatch-baseline_matched.csv")
+    assert len(pc) == 6 and "d_underprov_rm" in pc.columns

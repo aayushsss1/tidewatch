@@ -117,8 +117,11 @@ def headline(runs: pd.DataFrame, profile: str) -> list:
                                              for x in (row["breach_iqr"][1], row["breach_iqr"][0]))
             row["extra_rm_iqr"] = tuple(x - ho for x in row["overprov_iqr"])
         if cfg == AGENT:
-            row["usd_per_run"] = float(v[(v["config"] == AGENT)]["usd"].mean())
-            row["tokens_per_run"] = float(v[(v["config"] == AGENT)]["tokens"].mean())
+            ev = v[(v["config"] == AGENT) & ~is_b(v)]
+            bb = v[(v["config"] == AGENT) & is_b(v)]
+            row["usd_per_run"], row["tokens_per_run"] = float(ev["usd"].mean()), float(ev["tokens"].mean())
+            if len(bb):
+                row["b_usd_per_run"], row["b_tokens_per_run"] = float(bb["usd"].mean()), float(bb["tokens"].mean())
         rows.append(row)
     return rows
 
@@ -157,7 +160,9 @@ def b_section(runs: pd.DataFrame, profile: str) -> list:
                         "overprov_delta_max": float(m["d_overprov_rm"].max()),
                         "lift_rm": float(m["lift_rm_a"].median()),
                         "underprov_delta_max": float(m["d_underprov_rm"].max()),
-                        "never_below_baseline": bool((m["d_underprov_rm"] <= 0).all())})
+                        # Only the lift configs can only add capacity; keda-cron is informational.
+                        "never_below_baseline": (bool((m["d_underprov_rm"] <= 0).all())
+                                                 if cfg in (AGENT, REGEX) else None)})
     return out
 
 
@@ -226,7 +231,7 @@ def figures(runs: pd.DataFrame, profile: str, out: Path) -> list:
     # 3. cost/benefit scatter
     fig, ax = plt.subplots(figsize=(8, 6))
     for r in hl:
-        if r["config"] == HPA:
+        if r["config"] == HPA or r["prevented_pct"] is None:
             continue
         xerr = yerr = None
         if "extra_rm_iqr" in r:
@@ -235,7 +240,7 @@ def figures(runs: pd.DataFrame, profile: str, out: Path) -> list:
             ylo, yhi = r["prevented_pct_iqr"]
             if ylo is not None:
                 yerr = [[max(r["prevented_pct"] - ylo, 0)], [max(yhi - r["prevented_pct"], 0)]]
-        y = r["prevented_pct"] if r["prevented_pct"] is not None else 0
+        y = r["prevented_pct"]
         ax.errorbar(r["extra_rm"], y, xerr=xerr, yerr=yerr, fmt="o", ms=9,
                     color=COLORS[r["config"]], mec="black", label=r["config"], capsize=4)
     ax.axhline(0, color="grey", lw=0.8)
@@ -296,9 +301,12 @@ def render(runs: pd.DataFrame, res: dict, figs: dict, title: str) -> str:
                          num(r["underprov"]),
                          f"${r['usd_per_run']:.4f} / {num(r['tokens_per_run'])}" if agent else "-"])
         L += [md_table(["config", "breach-min", "% prevented vs HPA", "extra replica-min vs HPA",
-                        "underprov replica-min", "agent $/run / tokens/run"], rows), ""]
+                        "underprov replica-min", "agent $/run / tokens/run (event scenarios)"], rows), ""]
         if not res["has_agent"]:
             L += ["Agent results pending.", ""]
+        elif any("b_usd_per_run" in r for r in pr["headline"]):
+            r = next(r for r in pr["headline"] if "b_usd_per_run" in r)
+            L += [f"Agent cost per run on the B scenarios: ${r['b_usd_per_run']:.4f} / {num(r['b_tokens_per_run'])} tokens.", ""]
         else:
             L += ["### Paired deltas (agent minus comparison)", ""]
             rows = []
@@ -312,7 +320,7 @@ def render(runs: pd.DataFrame, res: dict, figs: dict, title: str) -> str:
                              f"{100 * a['share_underprov_le']:.1f}% ({a['n']} runs)"])
             L += [md_table(["pair", "n", "breach delta (sum)", "breach delta (median)", "underprov delta (sum)",
                             "agent waste: overprov delta (sum)", "overprov delta (median)",
-                            "share agent underprov <= comparison (all scenarios)"], rows), ""]
+                            "share agent underprov <= comparison (empirical, all scenarios)"], rows), ""]
         L += ["### Breach-minutes per family (median over repeats)", ""]
         tab = per_family(runs, p)
         L += [md_table(["family"] + list(tab.columns),
@@ -323,7 +331,8 @@ def render(runs: pd.DataFrame, res: dict, figs: dict, title: str) -> str:
                             "lift replica-min", "underprov delta (max)", "never below baseline"],
                            [[b["family"], b["config"], b["n"], num(b["breach"]), num(b["overprov_delta"]),
                              num(b["overprov_delta_max"]), num(b["lift_rm"]), num(b["underprov_delta_max"]),
-                             "yes" if b["never_below_baseline"] else "NO"] for b in pr["b"]]), ""]
+                             {True: "yes", False: "NO", None: "n/a (informational)"}[b["never_below_baseline"]]]
+                            for b in pr["b"]]), ""]
         else:
             L += ["No B-scenario rows.", ""]
         L += ["### Figures", ""] + [f"![{cap}]({fn})" for fn, cap in figs.get(p, [])] + [""]
@@ -339,6 +348,10 @@ def main(argv=None):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     res = build(runs)
+    for p in res["profiles"]:
+        if res["has_agent"]:
+            for other in (BASE, REGEX):
+                paired(runs, AGENT, other, p).to_csv(out / f"paired_{other}_{p}.csv", index=False)
     figs = {p: figures(runs, p, out) for p in res["profiles"]}
     (out / "summary.md").write_text(render(runs, res, figs, out.name or "results") + "\n")
     (out / "summary.json").write_text(json.dumps(res, indent=2, default=lambda o: None if o is None else str(o)) + "\n")
