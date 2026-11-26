@@ -86,7 +86,7 @@ func TestDetectTriggers_ActiveOverrideSuppressesAllButWorkloadChange(t *testing.
 	tw.UID, tw.Namespace, tw.Name = "uid-1", "ns", "wl"
 	pol := &v1.TidePolicy{}
 	pol.Spec.Agent.Enabled = true
-	newItem := func() *item {
+	newItem := func(now time.Time) *item {
 		st := &wlState{outsideSteps: 5, outsideAt: now, externalChange: true}
 		return &item{
 			tw: tw, pol: pol, st: st, now: now, step: time.Minute, horizon: 30 * time.Minute, actual: 10,
@@ -96,7 +96,7 @@ func TestDetectTriggers_ActiveOverrideSuppressesAllButWorkloadChange(t *testing.
 		}
 	}
 
-	e.detectTriggers(context.Background(), newItem(), true)
+	e.detectTriggers(context.Background(), newItem(now), true)
 	if got := s.types(); !slices.Contains(got, signal.Anomaly) || !slices.Contains(got, signal.WorkloadChange) {
 		t.Fatalf("without an override both must fire, got %v", got)
 	}
@@ -111,8 +111,17 @@ func TestDetectTriggers_ActiveOverrideSuppressesAllButWorkloadChange(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	e.detectTriggers(context.Background(), newItem(), true)
+	e.detectTriggers(context.Background(), newItem(now), true)
 	if got := s.types(); !slices.Equal(got, []signal.Type{signal.WorkloadChange}) {
 		t.Fatalf("with an active override only WorkloadChange may fire, got %v", got)
+	}
+
+	// Suppressed triggers were not debounced: once the override ends, an Anomaly fires at once.
+	s.mu.Lock()
+	s.got = nil
+	s.mu.Unlock()
+	e.detectTriggers(context.Background(), newItem(now.Add(21*time.Minute)), true)
+	if got := s.types(); !slices.Contains(got, signal.Anomaly) {
+		t.Fatalf("Anomaly must fire right after the override ends, got %v", got)
 	}
 }

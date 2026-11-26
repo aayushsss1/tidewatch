@@ -70,6 +70,9 @@ type Input struct {
 	Restarts5m                 int
 	Notes                      string
 	Healthy                    bool
+	// Covered means an active override already handles the workload: only
+	// WorkloadChange may fire, and nothing else is debounced or recorded.
+	Covered bool
 }
 
 // Debouncer suppresses repeats of the same trigger type per workload.
@@ -136,6 +139,9 @@ func Detect(in Input, uid types.UID, wl types.NamespacedName, pol v1.PolicyRef, 
 	}
 	var out []Trigger
 	emit := func(t Type, severity float64, ttb *time.Duration, shortfall float64, detail string) {
+		if in.Covered && t != WorkloadChange {
+			return
+		}
 		if !d.allow(uid, t, in.Now, severity) {
 			return
 		}

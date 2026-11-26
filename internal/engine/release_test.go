@@ -10,10 +10,14 @@ import (
 	v1 "github.com/aayushsss1/tidewatch/api/v1alpha1"
 	"github.com/aayushsss1/tidewatch/internal/overrides"
 	"github.com/aayushsss1/tidewatch/internal/workload"
+	"github.com/aayushsss1/tidewatch/pkg/forecast"
 )
 
-// releaseRig drives releaseOverrides one minute at a time. Baseline capacity is
-// 2 replicas × 10 × 0.8 = 16.
+const testIncident = "inc"
+
+// releaseRig drives releaseOverrides one minute at a time with the real
+// Baseline(). unit = 10 × 0.8 = 8; the override floor of 8 replicas covers 64
+// of load, so the event counts as seen from a load of 44.8.
 type releaseRig struct {
 	t      *testing.T
 	e      *Engine
@@ -37,31 +41,44 @@ func newReleaseRig(t *testing.T, start time.Time) *releaseRig {
 	return &releaseRig{t: t, e: &Engine{ov: store}, store: store, st: &wlState{}, tw: tw, start: start}
 }
 
-// tick evaluates minute m after the override start and reports whether it was released.
-func (r *releaseRig) tick(m int, actual float64, healthy bool) bool {
-	it := &item{
-		tw: r.tw, st: r.st, now: r.start.Add(time.Duration(m) * time.Minute), actual: actual,
-		cfg:   workload.EffectiveConfig{TargetPerReplica: 10, Headroom: 0.8},
-		scale: workload.ScaleState{Replicas: 8},
+// tick evaluates minute m after the override start. upper is the trusted
+// forecast's upper bound inside the baseline lookahead (0 for no forecast).
+// It reports whether the override was released.
+func (r *releaseRig) tick(m int, actual, upper float64, healthy bool) bool {
+	now := r.start.Add(time.Duration(m) * time.Minute)
+	cfg := workload.EffectiveConfig{TargetPerReplica: 10, Headroom: 0.8}
+	var trusted *forecast.Forecast
+	if upper > 0 {
+		trusted = &forecast.Forecast{Points: []forecast.ForecastPoint{{T: now.Add(2 * time.Minute), Upper: upper}}}
 	}
-	it.base.Desired = 2
+	it := &item{
+		tw: r.tw, st: r.st, now: now, actual: actual, cfg: cfg, scale: workload.ScaleState{Replicas: 8},
+	}
+	it.base = Baseline(BaselineInput{
+		Now: now, Actual: actual, Trusted: trusted, TimeToReady: time.Minute, Margin: 2 * time.Minute, Config: cfg,
+	})
 	r.e.releaseOverrides(it, healthy)
 	r.events = it.events
 	return len(it.events) > 0
 }
 
-func TestReleaseOverrides_AfterTenQuietMinutes(t *testing.T) {
+func TestReleaseOverrides_SpikeThenDecline(t *testing.T) {
 	r := newReleaseRig(t, t0)
-	for m := range 10 {
-		if r.tick(m, 12, true) {
-			t.Fatalf("released too early at minute %d", m)
+	for m := range 5 { // the event: load needs the whole floor, baseline >= floor
+		if r.tick(m, 60, 0, true) {
+			t.Fatalf("released during the spike at minute %d", m)
 		}
 	}
-	if !r.tick(10, 12, true) {
-		t.Fatal("must release once 10 quiet minutes have passed")
+	// The load drops at minute 5: the baseline alone is now 2 replicas.
+	for m := 5; m < 15; m++ {
+		if r.tick(m, 12, 0, true) {
+			t.Fatalf("released at minute %d, before 10 quiet minutes", m)
+		}
 	}
-	now := t0.Add(10 * time.Minute)
-	if m, o := r.store.Active(r.tw.UID, now); m != 0 || o != nil {
+	if !r.tick(15, 12, 0, true) {
+		t.Fatal("must release 10 minutes after the baseline dropped below the floor")
+	}
+	if m, o := r.store.Active(r.tw.UID, t0.Add(15*time.Minute)); m != 0 || o != nil {
 		t.Fatal("override must no longer be active")
 	}
 	res := r.store.TakeResolutions()
@@ -72,53 +89,56 @@ func TestReleaseOverrides_AfterTenQuietMinutes(t *testing.T) {
 	if len(ev) != 1 || len(ev[0].Reasons) != 1 || ev[0].Reasons[0] != "early_release" || ev[0].IncidentID != testIncident {
 		t.Fatalf("events = %+v", ev)
 	}
+	// Release then the Expire sweep: still exactly one resolution.
+	r.store.Expire(t0.Add(16 * time.Minute))
+	if res := r.store.TakeResolutions(); len(res) != 0 {
+		t.Fatalf("Expire duplicated the resolution: %+v", res)
+	}
 }
 
-func TestReleaseOverrides_NotWhileLoadExceedsBaseline(t *testing.T) {
+func TestReleaseOverrides_NotBeforeTheEvent(t *testing.T) {
 	r := newReleaseRig(t, t0)
-	for m := range 30 {
-		load := 12.0
-		if m%8 == 7 { // a spike every 8 minutes keeps resetting the quiet streak
-			load = 17
+	for m := range 31 { // a prescale: low load, baseline below the floor, but no peak yet
+		if r.tick(m, 12, 0, true) {
+			t.Fatalf("a prescale was released at minute %d", m)
 		}
-		if r.tick(m, load, true) {
-			t.Fatalf("released at minute %d despite load above baseline capacity", m)
-		}
-	}
-	if r.tick(31, 16, true) || !r.tick(41, 16, true) { // exactly at capacity counts as quiet
-		t.Fatal("load equal to baseline capacity is quiet: release 10m after the streak began")
 	}
 }
 
-func TestReleaseOverrides_NotBeforeStartPlusTenMinutes(t *testing.T) {
-	// Quiet since before the override began: still no release before start+10m.
-	r := newReleaseRig(t, t0.Add(10*time.Minute))
-	r.st.quietSince = map[string]time.Time{"o1/inc": t0}
-	if r.tick(0, 5, true) || r.tick(9, 5, true) {
-		t.Fatal("released before start+10m")
-	}
-	if !r.tick(10, 5, true) {
-		t.Fatal("must release at start+10m when load has been quiet for 10m")
-	}
-}
-
-func TestReleaseOverrides_DegradedDataNeverCounts(t *testing.T) {
+func TestReleaseOverrides_NotWhileBaselineBindsAtTheFloor(t *testing.T) {
 	r := newReleaseRig(t, t0)
-	for m := range 9 {
-		r.tick(m, 5, true)
+	r.tick(0, 60, 0, true)
+	for m := 1; m < 31; m++ {
+		// Load is low but the forecast lookahead still wants the floor.
+		if r.tick(m, 12, 64, true) {
+			t.Fatalf("released at minute %d while the baseline still needs the floor", m)
+		}
 	}
-	if r.tick(9, math.NaN(), true) || r.tick(10, 5, false) {
+	for m := 31; m < 41; m++ { // forecast gone: the streak starts now
+		if r.tick(m, 12, 0, true) {
+			t.Fatalf("released early at minute %d", m)
+		}
+	}
+	if !r.tick(41, 12, 0, true) {
+		t.Fatal("must release 10 minutes after the baseline fell below the floor")
+	}
+}
+
+func TestReleaseOverrides_DegradedDataResetsTheStreak(t *testing.T) {
+	r := newReleaseRig(t, t0)
+	r.tick(0, 60, 0, true)
+	for m := 1; m < 10; m++ {
+		r.tick(m, 12, 0, true)
+	}
+	if r.tick(10, math.NaN(), 0, true) || r.tick(11, 12, 0, false) {
 		t.Fatal("NaN or unhealthy data must not release")
 	}
-	// The streak restarted: 10 more clean minutes are needed.
-	for m := 11; m < 20; m++ {
-		if r.tick(m, 5, true) {
-			t.Fatalf("released at minute %d, streak should have restarted at 11", m)
+	for m := 12; m < 22; m++ { // the streak restarted at 12
+		if r.tick(m, 12, 0, true) {
+			t.Fatalf("released at minute %d, the streak should have restarted at 12", m)
 		}
 	}
-	if !r.tick(21, 5, true) {
+	if !r.tick(22, 12, 0, true) {
 		t.Fatal("must release after a fresh 10 quiet minutes")
 	}
 }
-
-const testIncident = "inc"

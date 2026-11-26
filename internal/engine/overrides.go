@@ -195,15 +195,26 @@ func outcomeLabel(o v1.Outcome) string {
 
 const (
 	// releaseAfter is both the minimum age of an override and the length of the
-	// quiet run (load at or below baseline capacity) that releases it early.
+	// run of ticks with the baseline below the override's floor that releases it.
 	releaseAfter  = 10 * time.Minute
 	reasonRelease = "early_release"
+	// peakFraction of the floor's capacity the load must reach to count as the event having happened.
+	peakFraction = 0.7
 )
 
-// releaseOverrides ends an active override early once it is at least
-// releaseAfter old and the load has stayed at or below the baseline's capacity
-// for releaseAfter without a break. Degraded data (NaN or unhealthy) breaks the
-// run. It runs before applyOverride so the baseline takes over on that tick.
+// releaseTrack is the early-release state of one override.
+type releaseTrack struct {
+	peakSeen bool
+	since    time.Time // start of the current run with the baseline below the floor; zero if none
+}
+
+// releaseOverrides ends an active override early once the event it covers has
+// happened (a healthy sample reached peakFraction of the floor's capacity) and
+// the pre-override baseline, lookahead included, has stayed below the floor for
+// releaseAfter, with the override at least releaseAfter old. Before the event a
+// prescale is intentionally above baseline and is never released. Degraded data
+// (NaN or unhealthy) resets the run. It runs before applyOverride, so
+// it.base.Desired is still the baseline alone.
 func (e *Engine) releaseOverrides(it *item, healthy bool) {
 	if e.ov == nil {
 		return
@@ -211,7 +222,7 @@ func (e *Engine) releaseOverrides(it *item, healthy bool) {
 	st, uid := it.st, it.tw.UID
 	ovs, _, _ := e.ov.Snapshot(uid)
 	unit := it.cfg.TargetPerReplica * it.cfg.Headroom
-	quiet := healthy && unit > 0 && !math.IsNaN(it.actual) && it.actual <= float64(it.base.Desired)*unit
+	good := healthy && unit > 0 && !math.IsNaN(it.actual)
 
 	live := map[string]bool{}
 	for _, o := range ovs {
@@ -220,25 +231,31 @@ func (e *Engine) releaseOverrides(it *item, healthy bool) {
 		}
 		k := overrideKey(o)
 		live[k] = true
-		if !quiet {
-			delete(st.quietSince, k)
+		if st.rel == nil {
+			st.rel = map[string]*releaseTrack{}
+		}
+		rt := st.rel[k]
+		if rt == nil {
+			rt = &releaseTrack{}
+			st.rel[k] = rt
+		}
+		if good && it.actual >= peakFraction*float64(o.MinReplicas)*unit {
+			rt.peakSeen = true
+		}
+		if !good || !rt.peakSeen || it.base.Desired >= o.MinReplicas {
+			rt.since = time.Time{}
 			continue
 		}
-		if st.quietSince == nil {
-			st.quietSince = map[string]time.Time{}
+		if rt.since.IsZero() {
+			rt.since = it.now
 		}
-		since, ok := st.quietSince[k]
-		if !ok {
-			since = it.now
-			st.quietSince[k] = since
-		}
-		if it.now.Sub(o.Start.Time) < releaseAfter || it.now.Sub(since) < releaseAfter {
+		if it.now.Sub(o.Start.Time) < releaseAfter || it.now.Sub(rt.since) < releaseAfter {
 			continue
 		}
 		if !e.ov.Release(uid, o.ID, it.now) {
 			continue
 		}
-		delete(st.quietSince, k)
+		delete(st.rel, k)
 		if t := st.tracks[k]; t != nil {
 			t.ov.End = metav1.NewTime(it.now) // score the shortened window
 		}
@@ -248,9 +265,9 @@ func (e *Engine) releaseOverrides(it *item, healthy bool) {
 			Reasons: []string{reasonRelease},
 		})
 	}
-	for k := range st.quietSince {
+	for k := range st.rel {
 		if !live[k] {
-			delete(st.quietSince, k)
+			delete(st.rel, k)
 		}
 	}
 }
