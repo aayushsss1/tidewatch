@@ -53,8 +53,9 @@ type wlState struct {
 	externalChange bool // the enforcer saw another actor change replicas last tick
 	restarts       []restartSample
 
-	tracks map[string]*track // overrides being sampled for outcome scoring, by override key
-	events []v1.Decision     // approval, rejection and expiry decisions awaiting a status write
+	quietSince map[string]time.Time // per override key: start of the current run of load <= baseline capacity
+	tracks     map[string]*track    // overrides being sampled for outcome scoring, by override key
+	events     []v1.Decision        // approval, rejection and expiry decisions awaiting a status write
 
 	statusWritten bool
 	lastStatus    time.Time

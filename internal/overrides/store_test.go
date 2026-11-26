@@ -399,3 +399,37 @@ func TestStore_AwaitingOutcome(t *testing.T) {
 		t.Fatal("scored")
 	}
 }
+
+func TestStore_ReleaseEndsOverrideOnceWithResolution(t *testing.T) {
+	s := NewStore()
+	mustAdd(t, s, ov("a", "i1", 4, t0, t0.Add(time.Hour)))
+	now := t0.Add(15 * time.Minute)
+	if !s.Release("u", "a", now) {
+		t.Fatal("Release of an active override must succeed")
+	}
+	if m, o := s.Active("u", now); m != 0 || o != nil {
+		t.Fatalf("released override still active: %d %+v", m, o)
+	}
+	ovs, _, _ := s.Snapshot("u")
+	if len(ovs) != 1 || !ovs[0].End.Time.Equal(now) {
+		t.Fatalf("End must be set to now, got %+v", ovs)
+	}
+	if !s.TakeDirty("u") {
+		t.Fatal("Release must mark the workload dirty")
+	}
+	res := s.TakeResolutions()
+	if len(res) != 1 || res[0].Verdict != ResEnded || res[0].By != "early_release" || res[0].IncidentID != "i1" {
+		t.Fatalf("resolutions = %+v", res)
+	}
+	// The later Expire sweep drops it without a second resolution.
+	s.Expire(now.Add(time.Second))
+	if res := s.TakeResolutions(); len(res) != 0 {
+		t.Fatalf("Expire duplicated the resolution: %+v", res)
+	}
+	if ovs, _, _ := s.Snapshot("u"); len(ovs) != 0 {
+		t.Fatalf("released override must be swept, got %+v", ovs)
+	}
+	if s.Release("u", "a", now) || s.Release("u", "nope", now) {
+		t.Fatal("releasing an ended or unknown override must report false")
+	}
+}

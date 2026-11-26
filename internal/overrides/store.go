@@ -73,6 +73,7 @@ type Store struct {
 	res   []Resolution
 	now   func() time.Time
 	made  map[madeKey]struct{} // overrides ever created, by incident and workload
+	rel   map[madeKey]struct{} // overrides released early and not yet swept by Expire
 	madeQ []madeKey
 }
 
@@ -233,6 +234,7 @@ func (s *Store) addOverrideLocked(uid types.UID, o v1.Override) {
 		}
 	}
 	d := s.wl(uid)
+	delete(s.rel, madeKey{o.IncidentID, uid}) // a replaced released override is never swept
 	d.overrides = slices.DeleteFunc(d.overrides, func(x v1.Override) bool { return x.IncidentID == o.IncidentID })
 	d.overrides = append(d.overrides, o)
 	if len(d.overrides) > MaxOverrides {
@@ -307,6 +309,34 @@ func (s *Store) Reject(incidentID string, uid types.UID, by string) bool {
 	return true
 }
 
+// Release ends the active override overrideID of uid early by setting its End
+// to now, and queues an ended resolution by "early_release". The override stays
+// until the next Expire sweep, which does not resolve it a second time. It
+// reports whether an active override was released.
+func (s *Store) Release(uid types.UID, overrideID string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.data[uid]
+	if d == nil {
+		return false
+	}
+	for i := range d.overrides {
+		o := &d.overrides[i]
+		if o.ID != overrideID || o.Start.After(now) || !o.End.After(now) {
+			continue
+		}
+		o.End = metav1.NewTime(now)
+		if s.rel == nil {
+			s.rel = map[madeKey]struct{}{}
+		}
+		s.rel[madeKey{o.IncidentID, uid}] = struct{}{}
+		s.dirty[uid] = struct{}{}
+		s.resolve(o.IncidentID, uid, ResEnded, "early_release", now)
+		return true
+	}
+	return false
+}
+
 // Expire removes pending approvals past their expiry and overrides past their end.
 func (s *Store) Expire(now time.Time) (expiredPending map[types.UID][]v1.PendingApproval, endedOverrides map[types.UID][]v1.Override) {
 	s.mu.Lock()
@@ -328,6 +358,10 @@ func (s *Store) Expire(now time.Time) (expiredPending map[types.UID][]v1.Pending
 				return false
 			}
 			endedOverrides[uid] = append(endedOverrides[uid], o)
+			if k := (madeKey{o.IncidentID, uid}); hasKey(s.rel, k) {
+				delete(s.rel, k) // already resolved by Release
+				return true
+			}
 			s.resolve(o.IncidentID, uid, ResEnded, "", now)
 			return true
 		})
@@ -461,6 +495,11 @@ func (s *Store) Forget(uid types.UID) {
 	defer s.mu.Unlock()
 	delete(s.data, uid)
 	delete(s.dirty, uid)
+	for k := range s.rel {
+		if k.uid == uid {
+			delete(s.rel, k)
+		}
+	}
 }
 
 // AddDecision queues an agent decision for the engine's next status write of

@@ -805,3 +805,14 @@ func TestInvestigator_DeadlineLeavesHeldDecisionAndSkippedEvent(t *testing.T) {
 		t.Fatalf("held=%+v ok=%v skipped=%v", d, ok, f.notif.skipped)
 	}
 }
+
+func TestSystemPrompt_OverrideDurationGuidance(t *testing.T) {
+	if PromptVersion != "m2.2" {
+		t.Fatalf("PromptVersion = %q, want m2.2", PromptVersion)
+	}
+	for _, want := range []string{"20 minutes after", "never longer than needed"} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Fatalf("system prompt lacks %q", want)
+		}
+	}
+}

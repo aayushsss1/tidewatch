@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -190,4 +191,66 @@ func outcomeLabel(o v1.Outcome) string {
 		return "timely"
 	}
 	return "late"
+}
+
+const (
+	// releaseAfter is both the minimum age of an override and the length of the
+	// quiet run (load at or below baseline capacity) that releases it early.
+	releaseAfter  = 10 * time.Minute
+	reasonRelease = "early_release"
+)
+
+// releaseOverrides ends an active override early once it is at least
+// releaseAfter old and the load has stayed at or below the baseline's capacity
+// for releaseAfter without a break. Degraded data (NaN or unhealthy) breaks the
+// run. It runs before applyOverride so the baseline takes over on that tick.
+func (e *Engine) releaseOverrides(it *item, healthy bool) {
+	if e.ov == nil {
+		return
+	}
+	st, uid := it.st, it.tw.UID
+	ovs, _, _ := e.ov.Snapshot(uid)
+	unit := it.cfg.TargetPerReplica * it.cfg.Headroom
+	quiet := healthy && unit > 0 && !math.IsNaN(it.actual) && it.actual <= float64(it.base.Desired)*unit
+
+	live := map[string]bool{}
+	for _, o := range ovs {
+		if o.Start.After(it.now) || !o.End.After(it.now) {
+			continue
+		}
+		k := overrideKey(o)
+		live[k] = true
+		if !quiet {
+			delete(st.quietSince, k)
+			continue
+		}
+		if st.quietSince == nil {
+			st.quietSince = map[string]time.Time{}
+		}
+		since, ok := st.quietSince[k]
+		if !ok {
+			since = it.now
+			st.quietSince[k] = since
+		}
+		if it.now.Sub(o.Start.Time) < releaseAfter || it.now.Sub(since) < releaseAfter {
+			continue
+		}
+		if !e.ov.Release(uid, o.ID, it.now) {
+			continue
+		}
+		delete(st.quietSince, k)
+		if t := st.tracks[k]; t != nil {
+			t.ov.End = metav1.NewTime(it.now) // score the shortened window
+		}
+		it.events = append(it.events, v1.Decision{
+			Time: metav1.NewTime(it.now), Source: v1.SourceAgent, IncidentID: o.IncidentID,
+			Desired: o.MinReplicas, Final: it.scale.Replicas, Verdict: v1.VerdictExpired,
+			Reasons: []string{reasonRelease},
+		})
+	}
+	for k := range st.quietSince {
+		if !live[k] {
+			delete(st.quietSince, k)
+		}
+	}
 }

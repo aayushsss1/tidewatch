@@ -22,7 +22,7 @@ import (
 )
 
 // PromptVersion is recorded with every investigation; bump it when systemPrompt changes.
-const PromptVersion = "m2.1"
+const PromptVersion = "m2.2"
 
 const systemPrompt = `You are Tidewatch's scaling investigator for a Kubernetes cluster. A deterministic ` +
 	`forecaster already scales workloads; you are called only when something unusual happened. Decide whether ` +
@@ -33,6 +33,9 @@ Hard facts about what you can do:
 - Each override is clamped to the workload's configured maximum replicas, and cannot affect workloads outside the incident.
 - An override window is at most 2 hours; start defaults to now and end defaults to 30 minutes after start.
 - Proposals below the policy's minimum confidence are discarded, and a human may have to approve them.
+- The engine also releases an override early once load has stayed within baseline capacity for 10 minutes, but do not rely on that.
+
+Override duration: set end no later than about 20 minutes after the expected peak or announced event ends, and never longer than needed. A short override that you can renew is better than a long one that holds replicas after the load is gone.
 
 Rules:
 - Prefer no_action when the evidence is weak, ambiguous or contradictory. A wrong scale-up costs money; a late one is usually covered by the baseline.

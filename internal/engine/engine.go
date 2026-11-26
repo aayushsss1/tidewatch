@@ -366,6 +366,7 @@ func (e *Engine) prepare(ctx context.Context, tw *v1.TideWorkload) *item {
 		return it
 	}
 	e.detectTriggers(ctx, it, gaps.Healthy())
+	e.releaseOverrides(it, gaps.Healthy())
 	e.applyOverride(it)
 	e.sampleOverrides(it)
 	e.saveSnapshot(it, series)
