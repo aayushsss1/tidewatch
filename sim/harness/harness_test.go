@@ -1,0 +1,180 @@
+package harness_test
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/aayushsss1/tidewatch/pkg/llm"
+	"github.com/aayushsss1/tidewatch/sim/cluster"
+	"github.com/aayushsss1/tidewatch/sim/harness"
+	"github.com/aayushsss1/tidewatch/sim/scenario"
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	_ = harness.Shutdown()
+	os.Exit(code)
+}
+
+// loadScenario loads the example flash sale, trimmed so a run takes a few seconds: the
+// surge starts at 9h; the run covers 8h to 10h.
+func loadScenario(t *testing.T) *scenario.Scenario {
+	t.Helper()
+	sc, err := scenario.Load(filepath.Join("..", "scenarios", "example-flash.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Start, sc.Duration, sc.History = 8*time.Hour, 2*time.Hour, 48*time.Hour
+	return sc
+}
+
+// flashProvider answers every investigation with a floor covering the event on the
+// frontend (a TideWorkload named frontend-deploy) when the incident includes it, and with
+// no_action otherwise. It is stateless, so concurrent or repeated runs are identical.
+type flashProvider struct {
+	floor int
+	end   time.Time
+}
+
+func (p *flashProvider) Name() string  { return "scripted" }
+func (p *flashProvider) Model() string { return "scripted-1" }
+
+func (p *flashProvider) Turn(_ context.Context, req llm.TurnRequest) (llm.TurnResponse, error) {
+	name, in := "no_action", map[string]any{"reason": "nothing for the frontend", "confidence": 0.9}
+	if strings.Contains(req.Messages[0].Text, "frontend-deploy: replicas") {
+		name, in = "propose_scaling", map[string]any{
+			"overrides":  []map[string]any{{"workload": "frontend-deploy", "minReplicas": p.floor, "end": p.end.Format(time.RFC3339)}},
+			"reason":     "flash sale announced for 09:00",
+			"confidence": 0.9,
+		}
+	}
+	raw, _ := json.Marshal(in)
+	return llm.TurnResponse{
+		Message:     llm.Message{Role: llm.RoleAssistant, ToolCall: &llm.ToolCall{ID: "c", Name: name, Input: raw}},
+		InputTokens: 1000, OutputTokens: 100,
+	}, nil
+}
+
+func agentConfig(sc *scenario.Scenario) harness.Config {
+	return harness.Config{
+		Name: "tidewatch-agent", Agent: true,
+		Provider: &flashProvider{floor: 40, end: sc.Epoch.Add(9*time.Hour + 40*time.Minute)},
+	}
+}
+
+func total(r harness.Result) (breach, waste float64, violations int) {
+	for _, m := range r.PerWorkload {
+		breach += m.BreachMinutes
+		waste += m.OverrideWasteRM
+		violations += m.SafetyViolation
+	}
+	return
+}
+
+func TestRun_TidewatchBaseline(t *testing.T) {
+	sc := loadScenario(t)
+	res, err := harness.Run(context.Background(), sc, harness.Config{Name: "tidewatch-baseline"}, 0, harness.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Scenario != "example-flash" || res.Config != "tidewatch-baseline" || len(res.PerWorkload) != 2 {
+		t.Fatalf("result = %+v", res)
+	}
+	for name, m := range res.PerWorkload {
+		if len(m.Samples) != 120 {
+			t.Errorf("%s: %d samples, want 120", name, len(m.Samples))
+		}
+		if m.ScaleEvents == 0 {
+			t.Errorf("%s: the engine never scaled", name)
+		}
+	}
+	breach, waste, viol := total(res)
+	if breach <= 0 {
+		t.Errorf("baseline breach minutes = %v, want > 0: a 3x flash sale outruns the forecaster", breach)
+	}
+	if waste != 0 || viol != 0 || res.Investigations != 0 || res.LLMCalls != 0 {
+		t.Errorf("baseline must not account overrides or LLM use: %+v", res)
+	}
+}
+
+func TestRun_TidewatchAgentOverrideApplied(t *testing.T) {
+	sc := loadScenario(t)
+	dir := t.TempDir()
+	base, err := harness.Run(context.Background(), sc, harness.Config{Name: "tidewatch-baseline"}, 0, harness.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := harness.Run(context.Background(), sc, agentConfig(sc), 0, harness.Options{TranscriptDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	breach, waste, viol := total(res)
+	baseBreach, _, _ := total(base)
+	if res.Investigations == 0 || res.LLMCalls == 0 || res.InputTokens == 0 || res.OutputTokens == 0 {
+		t.Fatalf("no agent activity: %+v", res)
+	}
+	if waste <= 0 {
+		t.Errorf("override_waste_rm = %v, want > 0: a floor of 40 exceeds what the load needed", waste)
+	}
+	if viol != 0 {
+		t.Errorf("safety_violations = %d, want 0", viol)
+	}
+	if breach > baseBreach {
+		t.Errorf("agent breach %v exceeds baseline %v", breach, baseBreach)
+	}
+	if want := filepath.Join(dir, "example-flash-tidewatch-agent-0.jsonl"); res.TranscriptPath != want {
+		t.Errorf("transcript path = %q, want %q", res.TranscriptPath, want)
+	}
+	if st, err := os.Stat(res.TranscriptPath); err != nil || st.Size() == 0 {
+		t.Errorf("transcript missing or empty: %v", err)
+	}
+	t.Logf("baseline breach=%v agent breach=%v waste=%v investigations=%d calls=%d", baseBreach, breach, waste, res.Investigations, res.LLMCalls)
+}
+
+func TestRun_Deterministic(t *testing.T) {
+	sc := loadScenario(t)
+	a, err := harness.Run(context.Background(), sc, agentConfig(sc), 0, harness.Options{Seed: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := harness.Run(context.Background(), sc, agentConfig(sc), 0, harness.Options{Seed: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("runs differ:\n%+v\n%+v", a, b)
+	}
+}
+
+type fixedController struct{ n int32 }
+
+func (fixedController) Name() string { return "fixed" }
+func (f fixedController) Step(_ context.Context, _ time.Time, sc *scenario.Scenario, cl *cluster.SimCluster) error {
+	for _, w := range sc.Workloads {
+		if err := cl.SetReplicas(harness.ControllerNamespace, w.Name, f.n); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestRun_ControllerMode(t *testing.T) {
+	sc := loadScenario(t)
+	res, err := harness.Run(context.Background(), sc, harness.Config{}, 0, harness.Options{Controller: fixedController{n: 60}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	breach, waste, viol := total(res)
+	if res.Config != "fixed" || breach != 0 || waste != 0 || viol != 0 || res.Investigations != 0 {
+		t.Fatalf("a fixed 60 replicas must never breach: %+v", res)
+	}
+	if res.PerWorkload["frontend"].OverprovRM <= 0 {
+		t.Error("expected over-provisioning")
+	}
+}

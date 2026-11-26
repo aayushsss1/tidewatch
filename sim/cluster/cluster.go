@@ -100,9 +100,11 @@ func (c *SimCluster) AddWorkload(ns, name string, spec WorkloadSpec) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	k := Key{ns, name}
-	// Per-workload stream derived from the seed and the name, so insertion order is irrelevant.
+	// Per-workload stream derived from the seed and the name, so insertion order is
+	// irrelevant. The namespace is deliberately excluded: the harness gives every run its
+	// own namespace, and runs must be reproducible.
 	h := int64(14695981039346656037 & 0x7fffffffffffffff)
-	for _, b := range []byte(ns + "/" + name) {
+	for _, b := range []byte(name) {
 		h = (h ^ int64(b)) * 1099511628211
 	}
 	w := &wl{spec: spec, rng: rand.New(rand.NewSource(c.seed ^ h))} //nolint:gosec // simulation
