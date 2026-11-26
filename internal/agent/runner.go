@@ -336,6 +336,22 @@ func (r *Runner) worker(ctx context.Context) {
 	}
 }
 
+// RunPending synchronously processes every incident currently queued and returns how
+// many it processed. It is for the simulator only: production uses Start's workers.
+func (r *Runner) RunPending(ctx context.Context) int {
+	n := 0
+	for ctx.Err() == nil {
+		inc, deadline, ok := r.queue.TryPop()
+		if !ok {
+			break
+		}
+		r.process(ctx, inc, deadline)
+		n++
+	}
+	queueDepth.Set(float64(r.queue.Len()))
+	return n
+}
+
 // policyRefOf returns the policy that governs inc; a storm uses its lead's.
 func (r *Runner) policyRefOf(inc *Incident) (v1.PolicyRef, bool) {
 	if !inc.Storm && inc.Policy != (v1.PolicyRef{}) {
