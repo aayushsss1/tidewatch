@@ -2,6 +2,22 @@
 // runner, investigator, tools and override store) against the simulated world: SimCluster,
 // SimProm and a fake clock. Only the world is simulated; an in-process envtest API server
 // holds the Deployment, TidePolicy and TideWorkload objects.
+//
+// Runs share that API server and the process-global engine/agent metrics, so they run
+// serially: Run holds a package-level mutex and concurrent calls queue.
+//
+// Safety accounting. Each step in which the engine evaluated a workload, the harness
+// compares the TideWorkload's status DesiredReplicas (after overrides, before
+// enforcement) with BaselineReplicas (the forecast's desire without overrides) via
+// SimCluster.AccountLift: a violation is Desired < Baseline, and LiftRM accumulates the
+// replica-minutes the agent added. This lift check is a near-tautological regression
+// guard on engine.applyOverride, which can only raise the baseline. It is not the
+// headline claim. "The agent never leaves less capacity than the baseline" is shown by the
+// paired comparison of an agent run with the baseline run of the same scenario and seed
+// (common random numbers): agent underprov_rm and breach_min must be <= the baseline's,
+// and override waste is agent overprov_rm minus baseline overprov_rm. That comparison is
+// empirical, not a proof, because enforcer state (cooldowns, rate limits) diverges between
+// the runs after the first override.
 package harness
 
 import (
@@ -11,12 +27,12 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -81,14 +97,23 @@ type Result struct {
 	Repeat           int
 	Model            string
 	PerWorkload      map[string]cluster.Metrics
-	Investigations   int
-	LLMCalls         int
-	InputTokens      int
-	OutputTokens     int
-	TranscriptPath   string
+	// Investigations counts only investigations that reached the provider (not skipped for
+	// budget, breaker, or a missed deadline).
+	Investigations int
+	LLMCalls       int
+	InputTokens    int
+	OutputTokens   int
+	TranscriptPath string
+	// SkippedSteps counts workload-steps the engine did not evaluate (see checkEvaluated),
+	// with SkippedReasons breaking them down. Tidewatch configs only; expected to be 0.
+	SkippedSteps   int
+	SkippedReasons map[string]int
 }
 
-var runCounter atomic.Int64
+var (
+	runMu      sync.Mutex
+	runCounter atomic.Int64
+)
 
 // countingProvider counts model calls and tokens for one run.
 type countingProvider struct {
@@ -142,6 +167,8 @@ func newLoadFn(sc *scenario.Scenario) loadFn {
 
 // Run simulates sc under cfg and returns its metrics.
 func Run(ctx context.Context, sc *scenario.Scenario, cfg Config, repeat int, opts Options) (Result, error) {
+	runMu.Lock()
+	defer runMu.Unlock()
 	epoch := opts.Epoch
 	if epoch.IsZero() {
 		epoch = scenario.DefaultEpoch
@@ -175,7 +202,6 @@ func Run(ctx context.Context, sc *scenario.Scenario, cfg Config, repeat int, opt
 
 	r := &run{
 		sc: sc, cfg: cfg, clk: clk, cl: cl, load: load, res: &res, ns: ControllerNamespace,
-		prevEffective: map[string]int32{},
 	}
 	if opts.Controller == nil {
 		r.ns = fmt.Sprintf("run-%d", runCounter.Add(1))
@@ -218,8 +244,6 @@ type run struct {
 	load loadFn
 	res  *Result
 	ns   string
-	// prevEffective is each workload's replicas after the previous step.
-	prevEffective map[string]int32
 }
 
 // advance moves the clock one step and accounts the slot that just elapsed.
@@ -463,53 +487,80 @@ func (r *run) runTidewatch(ctx context.Context, opts Options, repeat int) error 
 		}
 		// 2. The engine evaluates the slot ending at t.
 		eng.Step(ctx)
+		evaluated, err := r.checkEvaluated(ctx, c, eng, tws, uids, t)
+		if err != nil {
+			return err
+		}
 		// 3. Agent: incident loop, then investigations, with the clock frozen.
 		if runner != nil {
 			runner.RunOnce(ctx)
 			runner.RunPending(ctx)
 		}
-		// 4+5. Advance one step and account; then account the override effects.
+		// 4+5. Advance one step and account the slot; then account the agent's lift.
 		r.advance(t)
-		if err := r.accountOverrides(ctx, c, store, tws, uids, t); err != nil {
-			return err
-		}
+		r.accountLift(evaluated)
+	}
+	if tw != nil {
+		return tw.Err()
 	}
 	return nil
 }
 
-// defaultScaleUpStep is the policy's default guardrails.scaleUp.maxStep, which the harness
-// leaves unset.
-const defaultScaleUpStep = 5
+// Reasons reported in Result.SkippedReasons besides the Forecasting condition's own.
+const (
+	skipNoConflict   = "no_conflict_condition"
+	skipNotEvaluated = "not_evaluated"
+)
 
-// accountOverrides records override waste and safety violations for the step that
-// began at t, for workloads with an active override. TideWorkload status
-// baselineReplicas is what the forecast wants before guardrails, so the baseline used for
-// the safety check is capped by what the scale-up rate limit lets the baseline reach in
-// one step from the previous effective replicas; otherwise a legitimately rate-limited
-// ramp would count as a violation.
-func (r *run) accountOverrides(
-	ctx context.Context, c client.Client, store *overrides.Store,
+// checkEvaluated verifies, after engine.Step at t, that the engine evaluated every
+// workload this step, and returns the TideWorkloads that were. The signal is the engine
+// Snapshot, which is saved only on a successful evaluation, and whose Now is the step it
+// evaluated. (TideWorkload status Decisions[0].Time is not usable: the engine only adds a
+// decision when it differs from the previous one, so its time is stale in steady state.)
+// A workload that was not evaluated is counted in SkippedSteps with the reason taken from
+// its Forecasting condition (metrics_unavailable, insufficient_data, no_data, ...), a
+// missing Conflict condition, or "not_evaluated".
+func (r *run) checkEvaluated(
+	ctx context.Context, c client.Client, eng *engine.Engine,
 	tws map[string]types.NamespacedName, uids map[string]types.UID, t time.Time,
-) error {
+) (map[string]v1.TideWorkload, error) {
+	ok := map[string]v1.TideWorkload{}
 	for _, w := range r.sc.Workloads {
-		prev, seen := r.prevEffective[w.Name]
-		st, err := r.cl.State(r.ns, w.Name)
-		if err != nil {
-			return err
-		}
-		r.prevEffective[w.Name] = st.Replicas
-		if _, ov := store.Active(uids[w.Name], t); ov == nil || !seen {
-			continue
-		}
 		var tw v1.TideWorkload
-		if err := c.Get(ctx, tws[w.Name], &tw); apierrors.IsNotFound(err) {
-			continue
-		} else if err != nil {
-			return err
+		if err := c.Get(ctx, tws[w.Name], &tw); err != nil {
+			return nil, err
 		}
-		baseline := min(tw.Status.BaselineReplicas, prev+defaultScaleUpStep, int32(w.MaxReplicas)) //nolint:gosec // small
-		needed := cluster.Needed(r.load(w.Name, t.Add(r.sc.Step)), w.Capacity, cluster.DefaultHeadroom)
-		r.cl.AccountOverride(r.sc.Step, cluster.Key{Namespace: r.ns, Name: w.Name}, baseline, st.Replicas, needed)
+		reason := ""
+		switch sn, have := eng.Snapshot(uids[w.Name]); {
+		case meta.FindStatusCondition(tw.Status.Conditions, v1.CondConflict) == nil:
+			reason = skipNoConflict
+		case !have || !sn.Now.Equal(t.Truncate(r.sc.Step)):
+			reason = skipNotEvaluated
+			if f := meta.FindStatusCondition(tw.Status.Conditions, v1.CondForecasting); f != nil &&
+				f.Status == metav1.ConditionFalse {
+				reason = f.Reason
+			}
+		}
+		if reason != "" {
+			r.res.SkippedSteps++
+			if r.res.SkippedReasons == nil {
+				r.res.SkippedReasons = map[string]int{}
+			}
+			r.res.SkippedReasons[reason]++
+			continue
+		}
+		ok[w.Name] = tw
 	}
-	return nil
+	return ok, nil
+}
+
+// accountLift records the agent's lift and safety violations for the step that began at t,
+// for the workloads the engine evaluated this step.
+func (r *run) accountLift(evaluated map[string]v1.TideWorkload) {
+	for _, w := range r.sc.Workloads {
+		if tw, ok := evaluated[w.Name]; ok {
+			r.cl.AccountLift(r.sc.Step, cluster.Key{Namespace: r.ns, Name: w.Name},
+				tw.Status.BaselineReplicas, tw.Status.DesiredReplicas)
+		}
+	}
 }

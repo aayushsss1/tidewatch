@@ -68,15 +68,22 @@ func (p *flashProvider) Turn(_ context.Context, req llm.TurnRequest) (llm.TurnRe
 func agentConfig(sc *scenario.Scenario) harness.Config {
 	return harness.Config{
 		Name: "tidewatch-agent", Agent: true,
-		Provider: &flashProvider{floor: 40, end: sc.Epoch.Add(9*time.Hour + 40*time.Minute)},
+		Provider: &flashProvider{floor: 55, end: sc.Epoch.Add(9*time.Hour + 40*time.Minute)},
 	}
 }
 
-func total(r harness.Result) (breach, waste float64, violations int) {
+type sums struct {
+	breach, under, over, lift float64
+	violations                int
+}
+
+func total(r harness.Result) (s sums) {
 	for _, m := range r.PerWorkload {
-		breach += m.BreachMinutes
-		waste += m.OverrideWasteRM
-		violations += m.SafetyViolation
+		s.breach += m.BreachMinutes
+		s.under += m.UnderprovRM
+		s.over += m.OverprovRM
+		s.lift += m.LiftRM
+		s.violations += m.SafetyViolation
 	}
 	return
 }
@@ -98,12 +105,15 @@ func TestRun_TidewatchBaseline(t *testing.T) {
 			t.Errorf("%s: the engine never scaled", name)
 		}
 	}
-	breach, waste, viol := total(res)
-	if breach <= 0 {
-		t.Errorf("baseline breach minutes = %v, want > 0: a 3x flash sale outruns the forecaster", breach)
+	got := total(res)
+	if got.breach <= 0 {
+		t.Errorf("baseline breach minutes = %v, want > 0: a 3x flash sale outruns the forecaster", got.breach)
 	}
-	if waste != 0 || viol != 0 || res.Investigations != 0 || res.LLMCalls != 0 {
-		t.Errorf("baseline must not account overrides or LLM use: %+v", res)
+	if got.lift != 0 || got.violations != 0 || res.Investigations != 0 || res.LLMCalls != 0 {
+		t.Errorf("baseline must not lift or use the LLM: %+v", res)
+	}
+	if res.SkippedSteps != 0 {
+		t.Errorf("engine skipped %d workload-steps: %v", res.SkippedSteps, res.SkippedReasons)
 	}
 }
 
@@ -118,19 +128,23 @@ func TestRun_TidewatchAgentOverrideApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	breach, waste, viol := total(res)
-	baseBreach, _, _ := total(base)
+	got, want := total(res), total(base)
 	if res.Investigations == 0 || res.LLMCalls == 0 || res.InputTokens == 0 || res.OutputTokens == 0 {
 		t.Fatalf("no agent activity: %+v", res)
 	}
-	if waste <= 0 {
-		t.Errorf("override_waste_rm = %v, want > 0: a floor of 40 exceeds what the load needed", waste)
+	if got.lift <= 0 {
+		t.Errorf("lift_rm = %v, want > 0: the override must raise desired above the baseline", got.lift)
 	}
-	if viol != 0 {
-		t.Errorf("safety_violations = %d, want 0", viol)
+	if got.violations != 0 {
+		t.Errorf("safety_violations = %d, want 0", got.violations)
 	}
-	if breach > baseBreach {
-		t.Errorf("agent breach %v exceeds baseline %v", breach, baseBreach)
+	if res.SkippedSteps != 0 {
+		t.Errorf("engine skipped %d workload-steps: %v", res.SkippedSteps, res.SkippedReasons)
+	}
+	// Paired comparison (same scenario and seed): the agent never leaves less capacity.
+	if got.under > want.under || got.breach > want.breach {
+		t.Errorf("agent underprov/breach %v/%v exceed paired baseline %v/%v",
+			got.under, got.breach, want.under, want.breach)
 	}
 	if want := filepath.Join(dir, "example-flash-tidewatch-agent-0.jsonl"); res.TranscriptPath != want {
 		t.Errorf("transcript path = %q, want %q", res.TranscriptPath, want)
@@ -138,8 +152,8 @@ func TestRun_TidewatchAgentOverrideApplied(t *testing.T) {
 	if st, err := os.Stat(res.TranscriptPath); err != nil || st.Size() == 0 {
 		t.Errorf("transcript missing or empty: %v", err)
 	}
-	t.Logf("baseline breach=%v agent breach=%v waste=%v investigations=%d calls=%d",
-		baseBreach, breach, waste, res.Investigations, res.LLMCalls)
+	t.Logf("breach base=%v agent=%v; underprov base=%v agent=%v; paired waste=%v; investigations=%d calls=%d",
+		want.breach, got.breach, want.under, got.under, got.over-want.over, res.Investigations, res.LLMCalls)
 }
 
 func TestRun_Deterministic(t *testing.T) {
@@ -154,6 +168,14 @@ func TestRun_Deterministic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(a, b) {
 		t.Fatalf("runs differ:\n%+v\n%+v", a, b)
+	}
+	// Startup delays are jittered, so a different seed gives a different run.
+	c, err := harness.Run(context.Background(), sc, agentConfig(sc), 0, harness.Options{Seed: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(a.PerWorkload, c.PerWorkload) {
+		t.Fatal("different seeds produced identical results; startup jitter is not applied")
 	}
 }
 
@@ -176,8 +198,8 @@ func TestRun_ControllerMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	breach, waste, viol := total(res)
-	if res.Config != "fixed" || breach != 0 || waste != 0 || viol != 0 || res.Investigations != 0 {
+	got := total(res)
+	if res.Config != "fixed" || got.breach != 0 || got.lift != 0 || got.violations != 0 || res.Investigations != 0 {
 		t.Fatalf("a fixed 60 replicas must never breach: %+v", res)
 	}
 	if res.PerWorkload["frontend"].OverprovRM <= 0 {

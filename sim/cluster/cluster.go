@@ -55,10 +55,13 @@ type Sample struct {
 
 // Metrics are the aggregates of a workload's accounted steps.
 type Metrics struct {
-	BreachMinutes   float64
-	OverprovRM      float64 // replica-minutes above needed
-	UnderprovRM     float64 // replica-minutes below needed (ready basis)
-	OverrideWasteRM float64
+	BreachMinutes float64
+	OverprovRM    float64 // replica-minutes above needed
+	UnderprovRM   float64 // replica-minutes below needed (ready basis)
+	// LiftRM is the replica-minutes of demand the agent added before enforcement:
+	// sum of max(0, desired - baselineDesired) * step. A diagnostic, not waste: waste is
+	// the paired difference of OverprovRM between an agent run and its baseline run.
+	LiftRM          float64
 	ScaleEvents     int
 	SafetyViolation int
 	Samples         []Sample
@@ -256,19 +259,18 @@ func (c *SimCluster) Spec(ns, name string) (WorkloadSpec, bool) {
 	return w.spec, true
 }
 
-// AccountOverride accumulates agent-override metrics for one step; the harness supplies
-// the baseline-vs-effective replicas. Waste is the effective replicas above both the
-// baseline and what was needed; a safety violation is effective < baseline. At most one
-// violation is counted per call (one call per step).
-func (c *SimCluster) AccountOverride(step time.Duration, k Key, baseline, effective, needed int32) {
+// AccountLift records one step of agent lift for a workload: the replicas desired after
+// overrides versus the baseline's desired. A violation (desired < baselineDesired) is
+// counted at most once per call (one call per step).
+func (c *SimCluster) AccountLift(step time.Duration, k Key, baselineDesired, desired int32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	w, ok := c.wls[k]
 	if !ok {
 		return
 	}
-	w.m.OverrideWasteRM += float64(max(0, effective-max(baseline, needed))) * step.Minutes()
-	if effective < baseline {
+	w.m.LiftRM += float64(max(0, desired-baselineDesired)) * step.Minutes()
+	if desired < baselineDesired {
 		w.m.SafetyViolation++
 	}
 }
