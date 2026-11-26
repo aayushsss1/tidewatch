@@ -16,6 +16,8 @@ import (
 	"github.com/aayushsss1/tidewatch/sim/scenario"
 )
 
+var baselineCfg = harness.Config{Name: "tidewatch-baseline"}
+
 func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = harness.Shutdown()
@@ -49,7 +51,9 @@ func (p *flashProvider) Turn(_ context.Context, req llm.TurnRequest) (llm.TurnRe
 	name, in := "no_action", map[string]any{"reason": "nothing for the frontend", "confidence": 0.9}
 	if strings.Contains(req.Messages[0].Text, "frontend-deploy: replicas") {
 		name, in = "propose_scaling", map[string]any{
-			"overrides":  []map[string]any{{"workload": "frontend-deploy", "minReplicas": p.floor, "end": p.end.Format(time.RFC3339)}},
+			"overrides": []map[string]any{{
+				"workload": "frontend-deploy", "minReplicas": p.floor, "end": p.end.Format(time.RFC3339),
+			}},
 			"reason":     "flash sale announced for 09:00",
 			"confidence": 0.9,
 		}
@@ -79,7 +83,7 @@ func total(r harness.Result) (breach, waste float64, violations int) {
 
 func TestRun_TidewatchBaseline(t *testing.T) {
 	sc := loadScenario(t)
-	res, err := harness.Run(context.Background(), sc, harness.Config{Name: "tidewatch-baseline"}, 0, harness.Options{})
+	res, err := harness.Run(context.Background(), sc, baselineCfg, 0, harness.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +110,7 @@ func TestRun_TidewatchBaseline(t *testing.T) {
 func TestRun_TidewatchAgentOverrideApplied(t *testing.T) {
 	sc := loadScenario(t)
 	dir := t.TempDir()
-	base, err := harness.Run(context.Background(), sc, harness.Config{Name: "tidewatch-baseline"}, 0, harness.Options{})
+	base, err := harness.Run(context.Background(), sc, baselineCfg, 0, harness.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +138,8 @@ func TestRun_TidewatchAgentOverrideApplied(t *testing.T) {
 	if st, err := os.Stat(res.TranscriptPath); err != nil || st.Size() == 0 {
 		t.Errorf("transcript missing or empty: %v", err)
 	}
-	t.Logf("baseline breach=%v agent breach=%v waste=%v investigations=%d calls=%d", baseBreach, breach, waste, res.Investigations, res.LLMCalls)
+	t.Logf("baseline breach=%v agent breach=%v waste=%v investigations=%d calls=%d",
+		baseBreach, breach, waste, res.Investigations, res.LLMCalls)
 }
 
 func TestRun_Deterministic(t *testing.T) {
@@ -166,7 +171,8 @@ func (f fixedController) Step(_ context.Context, _ time.Time, sc *scenario.Scena
 
 func TestRun_ControllerMode(t *testing.T) {
 	sc := loadScenario(t)
-	res, err := harness.Run(context.Background(), sc, harness.Config{}, 0, harness.Options{Controller: fixedController{n: 60}})
+	opts := harness.Options{Controller: fixedController{n: 60}}
+	res, err := harness.Run(context.Background(), sc, harness.Config{}, 0, opts)
 	if err != nil {
 		t.Fatal(err)
 	}

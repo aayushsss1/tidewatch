@@ -245,7 +245,9 @@ func TestRun_ObserverSeesEveryTurn(t *testing.T) {
 	if !turns[0].Nudged || turns[0].Exit != "" || turns[0].Response.InputTokens != 10 {
 		t.Errorf("turn 1 = %+v", turns[0])
 	}
-	if r := turns[1].ToolResult; r == nil || r.Content != llm.WrapData("query", "hello") || turns[1].Response.Message.ToolCall.Name != toolQuery {
+	r := turns[1].ToolResult
+	if r == nil || r.Content != llm.WrapData("query", "hello") ||
+		turns[1].Response.Message.ToolCall.Name != toolQuery {
 		t.Errorf("turn 2 = %+v", turns[1])
 	}
 	if turns[2].Exit != llm.ExitTerminal || turns[2].ToolResult != nil || turns[2].N != 3 {

@@ -47,6 +47,7 @@ const (
 	promURL      = "http://promsim.invalid"
 	labelEnabled = "tidewatch.dev/enabled"
 	labelApp     = "app"
+	policyName   = "policy"
 	reconcileMax = 20
 )
 
@@ -172,13 +173,17 @@ func Run(ctx context.Context, sc *scenario.Scenario, cfg Config, repeat int, opt
 	cl := cluster.New(seed, clk)
 	load := newLoadFn(sc)
 
-	r := &run{sc: sc, cfg: cfg, clk: clk, cl: cl, load: load, res: &res, ns: ControllerNamespace, prevEffective: map[string]int32{}}
+	r := &run{
+		sc: sc, cfg: cfg, clk: clk, cl: cl, load: load, res: &res, ns: ControllerNamespace,
+		prevEffective: map[string]int32{},
+	}
 	if opts.Controller == nil {
 		r.ns = fmt.Sprintf("run-%d", runCounter.Add(1))
 	}
 	for _, w := range sc.Workloads {
 		l0 := load(w.Name, sc.StartTime())
-		initial := min(max(cluster.Needed(l0, w.Capacity, cluster.DefaultHeadroom), int32(w.MinReplicas)), int32(w.MaxReplicas)) //nolint:gosec // small
+		needed := cluster.Needed(l0, w.Capacity, cluster.DefaultHeadroom)
+		initial := min(max(needed, int32(w.MinReplicas)), int32(w.MaxReplicas)) //nolint:gosec // small
 		cl.AddWorkload(r.ns, w.Name, cluster.WorkloadSpec{
 			CapacityRPS: w.Capacity, StartupDelay: cluster.Delay{Mean: w.StartupDelay}, Initial: initial,
 		})
@@ -277,7 +282,7 @@ func (r *run) objects(ctx context.Context, c client.Client) error {
 		}
 	}
 	pol := &v1.TidePolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: r.ns},
+		ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: r.ns},
 		Spec: v1.TidePolicySpec{
 			Mode:       v1.ModeActive,
 			Prometheus: v1.PrometheusSpec{URL: promURL},
@@ -304,8 +309,10 @@ func (r *run) objects(ctx context.Context, c client.Client) error {
 
 // reconcile runs the policy controller until each workload has a TideWorkload whose
 // Conflict condition is set, and returns the TideWorkloads by workload name.
-func (r *run) reconcile(ctx context.Context, rec *controller.TidePolicyReconciler) (map[string]types.NamespacedName, error) {
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: r.ns, Name: "policy"}}
+func (r *run) reconcile(
+	ctx context.Context, rec *controller.TidePolicyReconciler,
+) (map[string]types.NamespacedName, error) {
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: r.ns, Name: policyName}}
 	out := map[string]types.NamespacedName{}
 	for range reconcileMax {
 		if _, err := rec.Reconcile(ctx, req); err != nil {
@@ -336,7 +343,7 @@ func (r *run) reconcile(ctx context.Context, rec *controller.TidePolicyReconcile
 // cleanup removes the run's policy and TideWorkloads so later runs' engines never see them.
 func (r *run) cleanup(rec *controller.TidePolicyReconciler) {
 	ctx := context.Background()
-	pol := &v1.TidePolicy{ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: r.ns}}
+	pol := &v1.TidePolicy{ObjectMeta: metav1.ObjectMeta{Name: policyName, Namespace: r.ns}}
 	_ = rec.Delete(ctx, pol)
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pol)}
 	for range 3 {
@@ -357,7 +364,7 @@ func (r *run) cleanup(rec *controller.TidePolicyReconciler) {
 
 func (r *run) publishNote(ctx context.Context, c client.Client, text string) error {
 	pol := &v1.TidePolicy{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: r.ns, Name: "policy"}, pol); err != nil {
+	if err := c.Get(ctx, types.NamespacedName{Namespace: r.ns, Name: policyName}, pol); err != nil {
 		return err
 	}
 	pol.Spec.Agent.Context.Notes = text
@@ -424,7 +431,7 @@ func (r *run) runTidewatch(ctx context.Context, opts Options, repeat int) error 
 			if err != nil {
 				return err
 			}
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 			tw, r.res.TranscriptPath = transcript.NewWriter(f), path
 		}
 		runner = agent.NewRunner(c, c, eng, store, &record.FakeRecorder{}, ro)

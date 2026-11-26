@@ -25,7 +25,8 @@ func (t tool) Run(context.Context, json.RawMessage) (string, error) {
 
 func call(name string, in, out int) llm.TurnResponse {
 	return llm.TurnResponse{
-		Message:     llm.Message{Role: llm.RoleAssistant, ToolCall: &llm.ToolCall{ID: "id", Name: name, Input: json.RawMessage(`{"q":1}`)}},
+		Message: llm.Message{Role: llm.RoleAssistant,
+			ToolCall: &llm.ToolCall{ID: "id", Name: name, Input: json.RawMessage(`{"q":1}`)}},
 		InputTokens: in, OutputTokens: out,
 	}
 }
@@ -34,7 +35,8 @@ func TestWriter_OneJSONLinePerTurnTaggedWithIncident(t *testing.T) {
 	var buf bytes.Buffer
 	w := transcript.NewWriter(&buf)
 	p := &llmtest.Scripted{Turns: []llm.TurnResponse{call("query", 10, 2), call("no_action", 20, 3)}}
-	_, _, err := llm.Run(context.Background(), p, "SYS", "brief", []llm.Tool{tool{name: "query"}, tool{name: "no_action", terminal: true}},
+	tools := []llm.Tool{tool{name: "query"}, tool{name: "no_action", terminal: true}}
+	_, _, err := llm.Run(context.Background(), p, "SYS", "brief", tools,
 		llm.Limits{MaxToolCalls: 5, Observer: w.Observer("inc-1")})
 	if err != nil || w.Err() != nil {
 		t.Fatal(err, w.Err())
@@ -52,7 +54,8 @@ func TestWriter_OneJSONLinePerTurnTaggedWithIncident(t *testing.T) {
 		t.Fatalf("records = %d, want 2", len(recs))
 	}
 	r0, r1 := recs[0], recs[1]
-	if r0.Incident != "inc-1" || r0.Turn != 1 || r0.System != "SYS" || len(r0.Messages) != 1 || r0.Messages[0].Text != "brief" {
+	if r0.Incident != "inc-1" || r0.Turn != 1 || r0.System != "SYS" ||
+		len(r0.Messages) != 1 || r0.Messages[0].Text != "brief" {
 		t.Errorf("turn 1 = %+v", r0)
 	}
 	if r0.Response == nil || r0.Response.ToolCall == nil || r0.Response.ToolCall.Name != "query" ||
