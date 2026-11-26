@@ -351,8 +351,8 @@ func TestCommittedMatrices(t *testing.T) {
 			agent++
 		}
 	}
-	// 6 workloads x 4 scenario kinds + 2 B scenarios; 7 configs, the agent x5.
-	if len(scenarios) != 26 || agent != 26*5 || len(hr) != 26*(6+5) {
+	// 6 workloads x (4 scenario kinds + 2 slow-start variants) + 2 B scenarios; 7 configs, the agent x5.
+	if len(scenarios) != 38 || agent != 38*5 || len(hr) != 38*(6+5) {
 		t.Errorf("headline: %d scenarios, %d agent runs, %d runs", len(scenarios), agent, len(hr))
 	}
 }

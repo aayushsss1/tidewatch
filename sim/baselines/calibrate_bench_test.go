@@ -30,7 +30,7 @@ func TestHeadlineCalibration(t *testing.T) {
 	}
 	withTW := os.Getenv("KUBEBUILDER_ASSETS") != ""
 	flash3Hit, flash3 := 0, 0
-	t.Logf("%-18s %5s %7s %9s", "scenario", "hpa", "oracle", "tw-base")
+	t.Logf("%-22s %5s %7s %9s %10s", "scenario", "hpa", "oracle", "tw-base", "regex-rule")
 	for _, f := range files {
 		name := strings.TrimSuffix(filepath.Base(f), ".yaml")
 		if strings.HasSuffix(name, "control") {
@@ -53,15 +53,21 @@ func TestHeadlineCalibration(t *testing.T) {
 			return b
 		}
 		hpa, oracle := breach(baselines.NameHPA), breach(baselines.NameOracle)
-		tw := "-"
+		tw, rule := "-", "-"
 		if withTW {
 			tw = formatFloat(breach(baselines.NameTWBaseline))
+			rule = formatFloat(breach(baselines.NameRegexRule))
 		}
-		t.Logf("%-18s %5.0f %7.0f %9s", name, hpa, oracle, tw)
+		t.Logf("%-22s %5.0f %7.0f %9s %10s", name, hpa, oracle, tw, rule)
 		if oracle != 0 {
 			t.Errorf("%s: oracle breach_min = %v, want 0", name, oracle)
 		}
 		switch {
+		case strings.HasSuffix(name, "-slow"):
+			// Slow-starting pods: a reactive scaler must lose real minutes.
+			if hpa < 4 {
+				t.Errorf("%s: hpa breach_min = %v, want >= 4 with 180s startup", name, hpa)
+			}
 		case strings.HasSuffix(name, "flash-3x"):
 			flash3++
 			if hpa > 0 {
