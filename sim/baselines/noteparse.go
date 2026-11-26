@@ -5,9 +5,9 @@
 package baselines
 
 import (
-	"regexp"
-	"strconv"
 	"time"
+
+	"github.com/aayushsss1/tidewatch/internal/signal"
 )
 
 // NoteEvent is what a human (or the regex rule) extracts from an ops note: an expected
@@ -17,57 +17,17 @@ type NoteEvent struct {
 	EventTime  time.Time
 }
 
-var (
-	// "expect ~4×", "expect 4x"; checked first so the stated forecast wins over other numbers.
-	// Every multiplier must be followed by a non-word character (or the end) so that "4xl",
-	// "4x4" and "0x10" are not read as multipliers.
-	reExpect = regexp.MustCompile(`(?i)expect\w*\s*~?\s*(\d+(?:\.\d+)?)\s*[x×](?:[^\w]|$)`)
-	// "4×", "4x", "4 x".
-	reNx = regexp.MustCompile(`(?i)(?:^|[^\w.])~?(\d+(?:\.\d+)?)\s*[x×](?:[^\w]|$)`)
-	// "×4", "x4".
-	reXn    = regexp.MustCompile(`(?i)(?:^|[^\w])[x×]\s*(\d+(?:\.\d+)?)(?:[^\w]|$)`)
-	reRFC   = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})`)
-	reClock = regexp.MustCompile(`(?:^|[^\d])(\d{1,2}):(\d{2})(?:[^\d:]|$)`)
-)
-
 // ParseNote extracts the multiplier and event time from an ops note published at
-// publishedAt. The time is an RFC3339 timestamp; failing that, a bare HH:MM is read as UTC
-// and resolved to its next occurrence at or after publishedAt (the example scenarios'
-// notes say "starts at 09:00"). Not supported: relative times ("in 20 minutes"), 12-hour
-// clock times ("9am"), dates without a clock time, and time zones on bare HH:MM. A note
-// with no multiplier, a non-positive one, or no time
-// does not parse. A parsed note is followed literally, however implausible.
+// publishedAt. It is a thin wrapper over the product's parser, signal.ParseNoteEvents, so
+// the controller baselines see exactly the events the agent's ContextDue trigger sees
+// (RFC3339, or "HH:MM UTC" / "HH:MM <IANA zone>" resolved to the next occurrence after
+// publishedAt; a bare HH:MM is not an event). The first future event with a multiplier > 0
+// wins: the rule and cron baselines need a multiplier, whereas the agent does not. A parsed
+// note is followed literally, however implausible.
 func ParseNote(text string, publishedAt time.Time) (NoteEvent, bool) {
-	var mult float64
-	for _, re := range []*regexp.Regexp{reExpect, reNx, reXn} {
-		for _, m := range re.FindAllStringSubmatch(text, -1) {
-			if v, err := strconv.ParseFloat(m[1], 64); err == nil && v > 0 {
-				mult = v
-				break
-			}
-		}
-		if mult > 0 {
-			break
-		}
-	}
-	if mult == 0 {
-		return NoteEvent{}, false
-	}
-	if s := reRFC.FindString(text); s != "" {
-		if t, err := time.Parse(time.RFC3339, s); err == nil {
-			return NoteEvent{Multiplier: mult, EventTime: t}, true
-		}
-	}
-	if m := reClock.FindStringSubmatch(text); m != nil {
-		h, _ := strconv.Atoi(m[1])
-		min, _ := strconv.Atoi(m[2])
-		if h < 24 && min < 60 {
-			u := publishedAt.UTC()
-			t := time.Date(u.Year(), u.Month(), u.Day(), h, min, 0, 0, time.UTC)
-			if t.Before(u) {
-				t = t.Add(24 * time.Hour)
-			}
-			return NoteEvent{Multiplier: mult, EventTime: t}, true
+	for _, ev := range signal.ParseNoteEvents(text, publishedAt) {
+		if ev.Multiplier > 0 {
+			return NoteEvent{Multiplier: ev.Multiplier, EventTime: ev.At}, true
 		}
 	}
 	return NoteEvent{}, false
