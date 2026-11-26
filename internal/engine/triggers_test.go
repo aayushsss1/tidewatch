@@ -106,7 +106,7 @@ func TestDetectTriggers_ActiveOverrideSuppressesAllButWorkloadChange(t *testing.
 	s.mu.Unlock()
 	e.debounce.Forget(tw.UID)
 	if err := store.AddOverride(tw.UID, v1.Override{
-		ID: "o1", IncidentID: "inc", MinReplicas: 5,
+		ID: "o1", IncidentID: testIncident, MinReplicas: 5,
 		Start: metav1.NewTime(now.Add(-time.Minute)), End: metav1.NewTime(now.Add(20 * time.Minute)),
 	}); err != nil {
 		t.Fatal(err)

@@ -63,17 +63,17 @@ func TestFillStatus_LastInvestigationSurvivesLaterDecisions(t *testing.T) {
 	e := &Engine{}
 	var s v1.TideWorkloadStatus
 	inv := v1.Decision{
-		Time: metav1.NewTime(t0), Source: v1.SourceAgent, IncidentID: "inc-1", Verdict: v1.VerdictApplied,
-		PromptVersion: "m2.2", Trace: []v1.TraceEntry{{Tool: "query_range"}},
+		Time: metav1.NewTime(t0), Source: v1.SourceAgent, IncidentID: inc1, Verdict: v1.VerdictApplied,
+		PromptVersion: testPromptV, Trace: []v1.TraceEntry{{Tool: "query_range"}},
 	}
 	it := statusItem(v1.Decision{Time: metav1.NewTime(t0), Verdict: v1.VerdictHeld, Final: 2})
 	it.events = []v1.Decision{
 		{Time: metav1.NewTime(t0), Source: v1.SourceAgent, PromptVersion: "m2.1", IncidentID: "old"},
 		inv,
-		{Time: metav1.NewTime(t0), Source: v1.SourceAgent, IncidentID: "inc-1", Verdict: v1.VerdictExpired}, // no prompt version
+		{Time: metav1.NewTime(t0), Source: v1.SourceAgent, IncidentID: inc1, Verdict: v1.VerdictExpired}, // no prompt version
 	}
 	e.fillStatus(&s, it)
-	if s.LastInvestigation == nil || s.LastInvestigation.IncidentID != "inc-1" || s.LastInvestigation.PromptVersion != "m2.2" {
+	if s.LastInvestigation == nil || s.LastInvestigation.IncidentID != inc1 || s.LastInvestigation.PromptVersion != testPromptV {
 		t.Fatalf("LastInvestigation = %+v", s.LastInvestigation)
 	}
 
@@ -87,8 +87,10 @@ func TestFillStatus_LastInvestigationSurvivesLaterDecisions(t *testing.T) {
 			t.Fatal("the investigation should have rotated out of Decisions")
 		}
 	}
-	if s.LastInvestigation == nil || s.LastInvestigation.IncidentID != "inc-1" ||
-		s.LastInvestigation.PromptVersion != "m2.2" || len(s.LastInvestigation.Trace) != 1 {
+	if s.LastInvestigation == nil || s.LastInvestigation.IncidentID != inc1 ||
+		s.LastInvestigation.PromptVersion != testPromptV || len(s.LastInvestigation.Trace) != 1 {
 		t.Fatalf("LastInvestigation lost: %+v", s.LastInvestigation)
 	}
 }
+
+const testPromptV = "m2.2"

@@ -29,7 +29,7 @@ func newReleaseRig(t *testing.T, start time.Time) *releaseRig {
 	tw := &v1.TideWorkload{}
 	tw.UID, tw.Namespace, tw.Name = "uid-r", "ns", "wl"
 	if err := store.AddOverride(tw.UID, v1.Override{
-		ID: "o1", IncidentID: "inc", MinReplicas: 8,
+		ID: "o1", IncidentID: testIncident, MinReplicas: 8,
 		Start: metav1.NewTime(start), End: metav1.NewTime(start.Add(90 * time.Minute)),
 	}); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestReleaseOverrides_AfterTenQuietMinutes(t *testing.T) {
 		t.Fatalf("resolutions = %+v", res)
 	}
 	ev := r.events
-	if len(ev) != 1 || len(ev[0].Reasons) != 1 || ev[0].Reasons[0] != "early_release" || ev[0].IncidentID != "inc" {
+	if len(ev) != 1 || len(ev[0].Reasons) != 1 || ev[0].Reasons[0] != "early_release" || ev[0].IncidentID != testIncident {
 		t.Fatalf("events = %+v", ev)
 	}
 }
@@ -120,3 +120,5 @@ func TestReleaseOverrides_DegradedDataNeverCounts(t *testing.T) {
 		t.Fatal("must release after a fresh 10 quiet minutes")
 	}
 }
+
+const testIncident = "inc"
