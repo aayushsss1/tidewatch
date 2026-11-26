@@ -1,0 +1,38 @@
+# CI smoke: a synthetic diurnal service with a chained API hit by a 3x flash sale, 2h measured.
+# Offsets are from the trace origin (epoch 00:00 UTC): 48h of history, then 2h measured
+# (48h..50h); the surge starts at 49h (01:00 UTC), announced at 48h25m.
+name: smoke-flash
+seed: 1
+trace:
+  type: synthetic:diurnal
+  base: 20
+  amp: 120
+  period: 24h
+  noise: 0.05
+  seed: 1
+start: 48h
+duration: 2h
+step: 1m
+history: 48h
+workloads:
+  - name: frontend
+    capacity: 10
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+  - name: api
+    capacity: 12
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+    lag: 90s
+    scale: 0.8
+events:
+  - kind: surge
+    start: 49h
+    ramp: 3m
+    hold: 20m
+    mult: 3
+notes:
+  - publishAt: 48h25m
+    text: 'Flash sale at {{at "49h"}}, expect ~3× traffic on frontend.'

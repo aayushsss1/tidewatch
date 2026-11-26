@@ -298,3 +298,52 @@ func TestScriptedProvider(t *testing.T) {
 		t.Errorf("call = %s", resp.Message.ToolCall.Name)
 	}
 }
+
+// TestCommittedMatrices checks the shipped matrices plan the expected runs and that the
+// synthetic (CI) scenarios load. The headline scenarios need the Azure cache, so they are
+// only planned here, not loaded.
+func TestCommittedMatrices(t *testing.T) {
+	smoke := filepath.Join("..", "..", "sim", "matrices", "smoke.yaml")
+	m, err := loadMatrix(smoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := plan(m, planOptions{MatrixFile: smoke, Guardrails: "matched"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 14 {
+		t.Errorf("smoke: %d runs, want 2 scenarios x 7 configs", len(runs))
+	}
+	for _, p := range runs[:1] {
+		if _, err := scenario.Load(p.Path); err != nil {
+			t.Errorf("%s: %v", p.ScenarioID, err)
+		}
+	}
+	for _, p := range runs {
+		if p.Config == "tidewatch-agent" && p.Repeat != 0 {
+			t.Errorf("smoke runs the agent once, got repeat %d", p.Repeat)
+		}
+	}
+
+	head := filepath.Join("..", "..", "sim", "matrices", "headline.yaml")
+	hm, err := loadMatrix(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr, err := plan(hm, planOptions{MatrixFile: head, Guardrails: "matched"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, agent := map[string]bool{}, 0
+	for _, p := range hr {
+		scenarios[p.ScenarioID] = true
+		if p.Config == "tidewatch-agent" {
+			agent++
+		}
+	}
+	// 6 workloads x 4 scenario kinds + 2 B scenarios; 7 configs, the agent x5.
+	if len(scenarios) != 26 || agent != 26*5 || len(hr) != 26*(6+5) {
+		t.Errorf("headline: %d scenarios, %d agent runs, %d runs", len(scenarios), agent, len(hr))
+	}
+}

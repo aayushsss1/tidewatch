@@ -1,0 +1,27 @@
+# CI smoke control: the same services with no event and no note, 2h measured.
+name: smoke-control
+seed: 1
+trace:
+  type: synthetic:diurnal
+  base: 20
+  amp: 120
+  period: 24h
+  noise: 0.05
+  seed: 1
+start: 48h
+duration: 2h
+step: 1m
+history: 48h
+workloads:
+  - name: frontend
+    capacity: 10
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+  - name: api
+    capacity: 12
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+    lag: 90s
+    scale: 0.8

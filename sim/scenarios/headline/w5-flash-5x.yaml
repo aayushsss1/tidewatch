@@ -1,0 +1,30 @@
+# Flash sale, 5x surge on one service, with a true note 30m ahead.
+# Azure Functions 2019 function #5 (HashFunction below), rescaled so its p99 per-minute rate is
+# 80 rps; per-pod capacity 25 rps gives about 4 pods at that p99 (headroom 0.8).
+# Offsets are from the trace origin (epoch 00:00 UTC): 72h of history (the window starts at 1h so chain lags stay inside the 14-day trace), then 6h measured (73h..79h); the
+# event starts at 76h (04:00 UTC), 3h into the measured window.
+name: w5-flash-5x
+seed: 5
+trace:
+  type: azure2019
+  function: 0ce67779eaa33056a996ccdeabeb3c04e48d41388d5fa734c30f505d7583b559
+  peakRPS: 80
+start: 73h
+duration: 6h
+step: 1m
+history: 72h
+workloads:
+  - name: frontend
+    capacity: 25
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+events:
+  - kind: surge
+    start: 76h
+    ramp: 5m
+    hold: 30m
+    mult: 5
+notes:
+  - publishAt: 75h30m
+    text: 'Flash sale at {{at "76h"}}, expect ~5× traffic on frontend.'

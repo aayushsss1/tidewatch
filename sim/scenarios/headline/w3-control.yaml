@@ -1,0 +1,21 @@
+# Control: no event and no note. Measures false alarms and waste.
+# Azure Functions 2019 function #3 (HashFunction below), rescaled so its p99 per-minute rate is
+# 120 rps; per-pod capacity 25 rps gives about 6 pods at that p99 (headroom 0.8).
+# Offsets are from the trace origin (epoch 00:00 UTC): 72h of history (the window starts at 1h so chain lags stay inside the 14-day trace), then 6h measured (73h..79h); the
+# event starts at 76h (04:00 UTC), 3h into the measured window.
+name: w3-control
+seed: 3
+trace:
+  type: azure2019
+  function: ea885ffca6338a2b781a0725ae8a661496779c7f0a7f78855b1f297b899640c0
+  peakRPS: 120
+start: 73h
+duration: 6h
+step: 1m
+history: 72h
+workloads:
+  - name: frontend
+    capacity: 25
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
