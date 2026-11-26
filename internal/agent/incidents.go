@@ -26,6 +26,13 @@ const (
 	StatusClosed        Status = "closed"
 )
 
+// A decided incident is re-queued at most once per requeueGap, and only for a
+// new trigger type or a shortfall of at least requeueFactor times the largest so far.
+const (
+	requeueGap    = 5 * time.Minute
+	requeueFactor = 2.0
+)
+
 // Member is a workload in an incident with the triggers it raised.
 type Member struct {
 	Workload types.NamespacedName
@@ -45,6 +52,7 @@ type Incident struct {
 	LastTrigger time.Time
 	Status      Status
 	Pending     bool // new triggers since last queued
+	lastQueued  time.Time
 	taken       bool // storm incidents are investigated at most once
 }
 
@@ -190,11 +198,31 @@ func (m *Manager) attach(in *Incident, t signal.Trigger, now time.Time) {
 		mem = &Member{Workload: t.Workload, UID: t.UID}
 		in.Members[t.UID] = mem
 	}
+	requeue := in.Status != StatusDecided || m.worthRequeue(in, t, now)
 	mem.Triggers = append(mem.Triggers, t)
-	in.LastTrigger, in.Pending = now, true
+	in.LastTrigger = now
+	in.Pending = in.Pending || requeue
 	if lead := in.Members[in.Lead]; lead == nil || t.At.Before(firstAt(lead)) {
 		in.Lead = t.UID
 	}
+}
+
+// worthRequeue reports whether t should re-queue a decided incident: its type
+// is new to the incident, or its shortfall is at least requeueFactor times the
+// largest seen so far; and at most once per requeueGap per incident. t must not
+// be attached yet.
+func (m *Manager) worthRequeue(in *Incident, t signal.Trigger, now time.Time) bool {
+	if !in.lastQueued.IsZero() && now.Sub(in.lastQueued) < requeueGap {
+		return false
+	}
+	seen, maxShort := false, 0.0
+	for _, mem := range in.Members {
+		for _, o := range mem.Triggers {
+			seen = seen || o.Type == t.Type
+			maxShort = max(maxShort, o.Shortfall)
+		}
+	}
+	return !seen || (t.Shortfall > 0 && t.Shortfall >= requeueFactor*maxShort)
 }
 
 func firstAt(m *Member) time.Time {
@@ -221,7 +249,7 @@ func (m *Manager) TakeReady() []*Incident {
 			continue
 		}
 		if in.Pending && (in.Status == StatusOpen || in.Status == StatusDecided) {
-			in.Pending, in.taken = false, true
+			in.Pending, in.taken, in.lastQueued = false, true, m.clk.Now()
 			out = append(out, in.clone())
 		}
 	}

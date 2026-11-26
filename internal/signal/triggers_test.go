@@ -306,10 +306,14 @@ func TestDetect_DebounceAllowsWorsening(t *testing.T) {
 	if has(Detect(in, "u", wl, pol, d), ForecastBreach) != nil {
 		t.Fatal("mild growth must be suppressed")
 	}
+	in.Now = t0.Add(4 * time.Minute)
 	in.Trusted = mk(250) // 1.5: tripled
 	shift(in.Trusted)
+	shift(in.Trusted)
+	shift(in.Trusted)
+	shift(in.Trusted)
 	if has(Detect(in, "u", wl, pol, d), ForecastBreach) == nil {
-		t.Fatal("shortfall growth of >=50% must fire")
+		t.Fatal("shortfall growth of >=2x after 3m must fire")
 	}
 }
 
@@ -336,5 +340,38 @@ func TestDetect_AnomalyShortfallCappedAtTen(t *testing.T) {
 	in.Actual, in.AnomalyForecast = 5000, 100 // ratio 49
 	if tr := has(detect(in), Anomaly); tr == nil || tr.Shortfall != 10 {
 		t.Fatalf("shortfall = %+v, want capped at 10", tr)
+	}
+}
+
+func TestDetect_DebounceWorseningNeedsDoubleAndThreeMinutes(t *testing.T) {
+	d := NewDebouncer()
+	in := base()
+	mk := func(upper float64, shift time.Duration) *forecast.Forecast {
+		up := flat(50)
+		for i := 19; i < 30; i++ {
+			up[i] = upper
+		}
+		f := fc("m", flat(50), up)
+		for i := range f.Points {
+			f.Points[i].T = f.Points[i].T.Add(shift)
+		}
+		return &f
+	}
+	fire := func(at time.Duration, upper float64) bool {
+		in.Now = t0.Add(at)
+		in.Trusted = mk(upper, at)
+		return has(Detect(in, "u", wl, pol, d), ForecastBreach) != nil
+	}
+	if !fire(0, 150) { // shortfall 0.5
+		t.Fatal("first must fire")
+	}
+	if fire(time.Minute, 260) { // 1.6: >2x but before 3m
+		t.Fatal("2x growth within 3m must be suppressed")
+	}
+	if fire(4*time.Minute, 190) { // 0.9: <2x
+		t.Fatal("1.8x growth after 3m must be suppressed")
+	}
+	if !fire(4*time.Minute, 260) { // 1.6 >= 1.0
+		t.Fatal("2x growth after 3m must fire")
 	}
 }

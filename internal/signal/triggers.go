@@ -37,7 +37,8 @@ const (
 	overProvisionedFrac = 0.5
 	debounceWindow      = 10 * time.Minute
 	overProvisionedGap  = time.Hour
-	worsenFactor        = 1.5
+	worsenFactor        = 2.0
+	worsenMinGap        = 3 * time.Minute
 	maxDetail           = 200
 )
 
@@ -105,7 +106,7 @@ func (d *Debouncer) Forget(uid types.UID) {
 }
 
 // allow reports whether a trigger may fire, recording it when it does.
-// Within the window it is suppressed unless severity grew by at least 50%.
+// Within the window it is suppressed unless severity at least doubled and the last fire was at least 3 minutes ago.
 func (d *Debouncer) allow(uid types.UID, t Type, now time.Time, severity float64) bool {
 	if d == nil {
 		return true
@@ -118,7 +119,8 @@ func (d *Debouncer) allow(uid types.UID, t Type, now time.Time, severity float64
 	defer d.mu.Unlock()
 	k := dkey{uid, t}
 	if prev, ok := d.last[k]; ok && now.Sub(prev.at) < window {
-		grew := severity > prev.severity && (prev.severity <= 0 || severity >= prev.severity*worsenFactor)
+		grew := now.Sub(prev.at) >= worsenMinGap && severity > prev.severity &&
+			(prev.severity <= 0 || severity >= prev.severity*worsenFactor)
 		if !worsens || !grew {
 			return false
 		}

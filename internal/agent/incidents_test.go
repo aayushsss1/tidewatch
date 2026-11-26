@@ -190,3 +190,49 @@ func TestManager_IDsUniqueAcrossRestarts(t *testing.T) {
 		t.Fatalf("a=%s b=%s nonce=%q", a.ID, b.ID, m1.nonce)
 	}
 }
+
+func TestManager_DecidedRequeueRules(t *testing.T) {
+	m, clk := newMgr()
+	mk := func(typ signal.Type, shortfall float64) signal.Trigger {
+		tr := trig("shop", "a", clk.Now())
+		tr.Type, tr.Shortfall = typ, shortfall
+		return tr
+	}
+	inc, _ := m.Add(mk(signal.Anomaly, 1))
+	m.TakeReady()
+	m.SetStatus(inc.ID, StatusDecided)
+
+	// Same type, similar shortfall: attaches without re-queueing.
+	clk.Step(6 * time.Minute)
+	m.Add(mk(signal.Anomaly, 1.5))
+	m.Add(mk(signal.Anomaly, 1))
+	if len(m.TakeReady()) != 0 {
+		t.Fatal("repeated same-type triggers must not re-queue a decided incident")
+	}
+
+	// A type not yet in the incident re-queues.
+	m.Add(mk(signal.ForecastBreach, 0.3))
+	r := m.TakeReady()
+	if len(r) != 1 || len(r[0].Members["a"].Triggers) != 4 {
+		t.Fatalf("new type must re-queue and attach, got %v", r)
+	}
+	m.SetStatus(inc.ID, StatusDecided)
+
+	// Within 5 minutes of the last queue, even a new type only attaches.
+	clk.Step(2 * time.Minute)
+	m.Add(mk(signal.ModelDisagreement, 0.5))
+	if len(m.TakeReady()) != 0 {
+		t.Fatal("5-minute floor must hold")
+	}
+
+	// After the floor, a >=2x shortfall of a known type re-queues.
+	clk.Step(4 * time.Minute)
+	m.Add(mk(signal.Anomaly, 2.9)) // max so far is 1.5: not 2x
+	if len(m.TakeReady()) != 0 {
+		t.Fatal("under 2x the max shortfall must not re-queue")
+	}
+	m.Add(mk(signal.Anomaly, 6))
+	if len(m.TakeReady()) != 1 {
+		t.Fatal("2x the max shortfall must re-queue")
+	}
+}

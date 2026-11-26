@@ -64,7 +64,17 @@ func (e *Engine) detectTriggers(ctx context.Context, it *item, healthy bool) {
 		Notes: e.notes(ctx, it), Healthy: true,
 	}
 	wl := client.ObjectKeyFromObject(it.tw)
+	// An active override means the agent already acted: the baseline plus the
+	// override cover the workload, so only a workload change may wake it again.
+	covered := false
+	if e.ov != nil {
+		_, o := e.ov.Active(it.tw.UID, it.now)
+		covered = o != nil
+	}
 	for _, t := range signal.Detect(in, it.tw.UID, wl, it.policyRef(), e.debounce) {
+		if covered && t.Type != signal.WorkloadChange {
+			continue
+		}
 		e.opts.Triggers.Submit(t)
 	}
 }
