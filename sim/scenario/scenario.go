@@ -451,10 +451,11 @@ func (s *Scenario) Notes() []Note {
 	out := make([]Note, len(s.NoteSpecs))
 	for i, n := range s.NoteSpecs {
 		// Render once, here, so Tidewatch and the controller baselines get identical text.
-		// validate has already proved the template renders, so the error cannot occur.
+		// validate has already proved the template renders, so an error is a bug: never fall
+		// back to publishing the raw template.
 		text, err := RenderNote(n.Text, s.Epoch)
 		if err != nil {
-			text = n.Text
+			panic(fmt.Sprintf("scenario %q: note %d: %v", s.Name, i, err))
 		}
 		out[i] = Note{PublishAt: s.Epoch.Add(n.PublishAt), Text: text}
 	}

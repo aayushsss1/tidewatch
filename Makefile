@@ -89,6 +89,10 @@ bench-smoke: build-bench setup-envtest ## Free smoke run: synthetic traces, scri
 		END { if (NR < 2) { print "bench-smoke: no result rows" > "/dev/stderr"; exit 2 }; \
 		if (bad) exit 1; print "bench-smoke: " NR - 1 " rows, no safety violations, no skipped steps" }' "$(BENCH_SMOKE_OUT)/results.csv"
 
+.PHONY: bench-calibrate
+bench-calibrate: setup-envtest ## Check the headline scenarios hurt HPA and not the oracle (needs the Azure cache; takes minutes).
+	$(BENCH_ENV) go test -tags bench -run TestHeadlineCalibration -v -timeout 30m ./sim/baselines
+
 .PHONY: bench
 bench: build-bench setup-envtest ## Real benchmark run (paid; needs ANTHROPIC_API_KEY): make bench MATRIX=sim/matrices/headline.yaml OUT=bin/bench [BENCH_FLAGS="--max-usd 5 --resume"].
 	@test -n "$$ANTHROPIC_API_KEY" || { echo "ANTHROPIC_API_KEY is required for make bench (use make bench-smoke for a free run)" >&2; exit 1; }
