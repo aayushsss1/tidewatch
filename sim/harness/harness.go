@@ -73,6 +73,21 @@ type Config struct {
 	Agent    bool
 	Provider llm.Provider // nil when !Agent
 	Model    string
+	// RuleOverrides, when set, is the regex-rule hook: a deterministic stand-in for the
+	// agent. After a note is published and before engine.Step, the harness calls it with
+	// the newly published note (once per note) and the engine snapshots from the previous
+	// step, keyed by workload name. Each returned override is added to the override store
+	// (ApprovedBy "rule", IncidentID "rule-<n>"), so the engine's guardrails apply.
+	RuleOverrides func(now time.Time, notes []scenario.Note, snaps map[string]engine.Snapshot) []RuleOverride
+}
+
+// RuleOverride is a deterministic override returned by Config.RuleOverrides for one
+// workload (by scenario workload name). End is clamped to overrides.MaxWindow by the store.
+type RuleOverride struct {
+	Workload    string
+	MinReplicas int32
+	Start, End  time.Time
+	Reason      string
 }
 
 // Controller is a non-Tidewatch baseline that acts on SimCluster directly. Workloads are
@@ -467,6 +482,7 @@ func (r *run) runTidewatch(ctx context.Context, opts Options, repeat int) error 
 	}
 
 	notes := r.sc.Notes()
+	ruleSeq := 0
 	for t := r.sc.StartTime(); t.Before(r.sc.EndTime()); t = t.Add(r.sc.Step) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -479,10 +495,16 @@ func (r *run) runTidewatch(ctx context.Context, opts Options, repeat int) error 
 			}
 		}
 		if due >= 0 {
-			text := notes[due].Text
+			note := notes[due]
+			text := note.Text
 			notes = notes[due+1:]
 			if err := r.publishNote(ctx, c, text); err != nil {
 				return fmt.Errorf("harness: publishing note: %w", err)
+			}
+			if r.cfg.RuleOverrides != nil {
+				if err := r.applyRules(t, note, eng, store, uids, &ruleSeq); err != nil {
+					return err
+				}
 			}
 		}
 		// 2. The engine evaluates the slot ending at t.
@@ -563,4 +585,36 @@ func (r *run) accountLift(evaluated map[string]v1.TideWorkload) {
 				tw.Status.BaselineReplicas, tw.Status.DesiredReplicas)
 		}
 	}
+}
+
+// applyRules calls the regex-rule hook for a newly published note and adds its overrides to
+// the store. Snapshots are the engine's evaluation of the previous step, so Actual is the
+// load at publish time.
+func (r *run) applyRules(
+	now time.Time, note scenario.Note, eng *engine.Engine, store *overrides.Store,
+	uids map[string]types.UID, seq *int,
+) error {
+	snaps := map[string]engine.Snapshot{}
+	for w, uid := range uids {
+		if sn, ok := eng.Snapshot(uid); ok {
+			snaps[w] = sn
+		}
+	}
+	for _, ro := range r.cfg.RuleOverrides(now, []scenario.Note{note}, snaps) {
+		uid, ok := uids[ro.Workload]
+		if !ok {
+			return fmt.Errorf("harness: rule override for unknown workload %q", ro.Workload)
+		}
+		*seq++
+		id := fmt.Sprintf("rule-%d", *seq)
+		err := store.AddOverride(uid, v1.Override{
+			ID: id, IncidentID: id, MinReplicas: ro.MinReplicas,
+			Start: metav1.NewTime(ro.Start), End: metav1.NewTime(ro.End),
+			Reason: ro.Reason, ApprovedBy: "rule",
+		})
+		if err != nil {
+			return fmt.Errorf("harness: adding rule override: %w", err)
+		}
+	}
+	return nil
 }
