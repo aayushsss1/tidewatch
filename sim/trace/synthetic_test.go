@@ -26,7 +26,7 @@ func TestDiurnalNoiseDeterministicBounded(t *testing.T) {
 		t.Fatal("noise not deterministic")
 	}
 	varied := false
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		v := d.At(time.Duration(i) * time.Minute)
 		if v < 90-1e-9 || v > 110+1e-9 {
 			t.Fatalf("noise out of bounds: %v", v)

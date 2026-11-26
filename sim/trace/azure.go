@@ -2,13 +2,14 @@ package trace
 
 import (
 	"bufio"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -110,9 +111,10 @@ func LoadAzure2019(dir string, sel Selector) ([]Workload, error) {
 
 func dayFiles(dir string) ([]string, error) {
 	files, _ := filepath.Glob(filepath.Join(dir, "invocations_per_function_md.anon.d*.csv"))
-	sort.Strings(files)
+	slices.Sort(files)
 	if len(files) == 0 {
-		return nil, fmt.Errorf("azure2019: no invocations_per_function_md.anon.d*.csv in %s; run scripts/bench/fetch-azure2019.sh", dir)
+		return nil, fmt.Errorf("azure2019: no invocations_per_function_md.anon.d*.csv in %s; "+
+			"run scripts/bench/fetch-azure2019.sh", dir)
 	}
 	return files, nil
 }
@@ -265,7 +267,7 @@ func loadTopN(files []string, sel Selector) ([]Workload, error) {
 	vol := func(w Workload) float64 {
 		return totals[key{w.Owner, w.App, w.ID}]
 	}
-	sort.SliceStable(ws, func(i, j int) bool { return vol(ws[i]) > vol(ws[j]) })
+	slices.SortStableFunc(ws, func(a, b Workload) int { return cmp.Compare(vol(b), vol(a)) })
 	var out []Workload
 	for _, w := range ws {
 		if autocorr(w.Counts, minutesPerDay) >= minACF {
@@ -276,18 +278,18 @@ func loadTopN(files []string, sel Selector) ([]Workload, error) {
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("azure2019: no function with mean >= %g/min and lag-%d autocorrelation >= %g", minMean, minutesPerDay, minACF)
+		return nil, fmt.Errorf("azure2019: no function with mean >= %g/min and lag-%d autocorrelation >= %g",
+			minMean, minutesPerDay, minACF)
 	}
 	return out, nil
 }
 
 func sortKeys(ks []key, by func(key) float64) {
-	sort.Slice(ks, func(i, j int) bool {
-		a, b := by(ks[i]), by(ks[j])
-		if a != b {
-			return a > b
+	slices.SortFunc(ks, func(a, b key) int {
+		if c := cmp.Compare(by(b), by(a)); c != 0 {
+			return c
 		}
-		return ks[i].fn < ks[j].fn // deterministic ties
+		return cmp.Compare(a.fn, b.fn) // deterministic ties
 	})
 }
 

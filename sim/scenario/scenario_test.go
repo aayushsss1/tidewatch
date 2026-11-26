@@ -166,15 +166,16 @@ workloads: [{name: a, capacity: 1}]
 }
 
 func TestValidationErrors(t *testing.T) {
+	rep := func(old, repl string) string { return strings.Replace(flat, old, repl, 1) }
 	base := func(mut func(string) string) string { return mut(flat) }
 	cases := map[string]struct{ y, want string }{
 		"no name":       {base(func(s string) string { return strings.Replace(s, "name: t\n", "", 1) }), "name"},
-		"zero duration": {base(func(s string) string { return strings.Replace(s, "duration: 2h", "duration: 0s", 1) }), "duration"},
+		"zero duration": {rep("duration: 2h", "duration: 0s"), "duration"},
 		"bad capacity": {base(func(s string) string {
 			return strings.Replace(s, "capacity: 5\n    startupDelay", "capacity: 0\n    startupDelay", 1)
 		}), "capacity"},
-		"min>max":        {base(func(s string) string { return strings.Replace(s, "minReplicas: 1\n", "minReplicas: 60\n", 1) }), "maxReplicas"},
-		"dup workload":   {base(func(s string) string { return strings.Replace(s, "name: api", "name: frontend", 1) }), "duplicate"},
+		"min>max":        {rep("minReplicas: 1\n", "minReplicas: 60\n"), "maxReplicas"},
+		"dup workload":   {rep("name: api", "name: frontend"), "duplicate"},
 		"bad event kind": {base(func(s string) string { return strings.Replace(s, "kind: surge", "kind: dip", 1) }), "kind"},
 		"bad mult":       {base(func(s string) string { return strings.Replace(s, "mult: 5", "mult: 0", 1) }), "mult"},
 		"unknown field":  {base(func(s string) string { return s + "bogus: 1\n" }), "bogus"},
@@ -185,9 +186,8 @@ func TestValidationErrors(t *testing.T) {
 		"lead lag": {base(func(s string) string {
 			return strings.Replace(s, "capacity: 5\n    startupDelay", "capacity: 5\n    lag: 1m\n    startupDelay", 1)
 		}), "lead"},
-		"too many": {base(func(s string) string {
-			return strings.Replace(s, "  - name: other", "  - name: o2\n    capacity: 1\n  - name: o3\n    capacity: 1\n  - name: other", 1)
-		}), "1-3 workloads"},
+		"too many": {rep("  - name: other", "  - name: o2\n    capacity: 1\n  - name: o3\n    capacity: 1\n"+
+			"  - name: other"), "1-3 workloads"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -204,7 +204,8 @@ func TestAzureTraceResolves(t *testing.T) {
 	hdr := "HashOwner,HashApp,HashFunction,Trigger" + strings.Repeat(",1", 1440) + "\n"
 	rowStr := "o,a,fnabc,http" + strings.Repeat(",60", 1440) + "\n"
 	for _, d := range []string{"d01", "d02"} {
-		if err := os.WriteFile(filepath.Join(dir, "invocations_per_function_md.anon."+d+".csv"), []byte(hdr+rowStr), 0o644); err != nil {
+		name := filepath.Join(dir, "invocations_per_function_md.anon."+d+".csv")
+		if err := os.WriteFile(name, []byte(hdr+rowStr), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

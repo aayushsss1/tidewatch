@@ -15,7 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -247,6 +247,13 @@ func (s *Scenario) validate() error {
 	if err := s.Trace.validate("trace"); err != nil {
 		return err
 	}
+	if err := s.validateWorkloads(); err != nil {
+		return err
+	}
+	return s.validateEventsAndNotes()
+}
+
+func (s *Scenario) validateWorkloads() error {
 	seen := map[string]bool{}
 	for i, w := range s.Workloads {
 		where := fmt.Sprintf("workloads[%d] (%q)", i, w.Name)
@@ -273,6 +280,10 @@ func (s *Scenario) validate() error {
 			}
 		}
 	}
+	return nil
+}
+
+func (s *Scenario) validateEventsAndNotes() error {
 	for i, e := range s.Events {
 		where := fmt.Sprintf("events[%d]", i)
 		switch {
@@ -407,6 +418,6 @@ func (s *Scenario) Notes() []Note {
 	for i, n := range s.NoteSpecs {
 		out[i] = Note{PublishAt: s.Epoch.Add(n.PublishAt), Text: n.Text}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].PublishAt.Before(out[j].PublishAt) })
+	slices.SortStableFunc(out, func(a, b Note) int { return a.PublishAt.Compare(b.PublishAt) })
 	return out
 }

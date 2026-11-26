@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+const (
+	idA      = "aaa111"
+	trigHTTP = "http"
+)
+
 var fixtureDir string
 
 // fixtureRows defines the hand-made functions: id, trigger, per-minute count fn.
@@ -22,9 +27,9 @@ func fixtureRows() []struct {
 		f        func(day, min int) int
 	}{
 		// Strong daily cycle, high volume.
-		{"aaa111", "http", func(_, m int) int { return 100 + int(90*math.Sin(2*math.Pi*float64(m)/1440)) }},
+		{idA, trigHTTP, func(_, m int) int { return 100 + int(90*math.Sin(2*math.Pi*float64(m)/1440)) }},
 		// Strong daily cycle, lower volume.
-		{"aab222", "http", func(_, m int) int { return 20 + int(18*math.Sin(2*math.Pi*float64(m)/1440)) }},
+		{"aab222", trigHTTP, func(_, m int) int { return 20 + int(18*math.Sin(2*math.Pi*float64(m)/1440)) }},
 		// Flat-ish noise, huge volume: no seasonality.
 		{"bbb333", "queue", func(d, m int) int { return 500 + (m*7919+d*104729)%97 }},
 		// Tiny volume with seasonality: below min mean rate.
@@ -51,7 +56,7 @@ func TestMain(m *testing.M) {
 		b.WriteString("\n")
 		for _, r := range fixtureRows() {
 			fmt.Fprintf(&b, "own,app,%s,%s", r.id, r.trig)
-			for i := 0; i < 1440; i++ {
+			for i := range 1440 {
 				fmt.Fprintf(&b, ",%d", r.f(day, i))
 			}
 			b.WriteString("\n")
@@ -72,7 +77,7 @@ func TestLoadAzure2019_ByPrefixConcatenatesDays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ws) != 1 || ws[0].ID != "aaa111" || ws[0].Trigger != "http" {
+	if len(ws) != 1 || ws[0].ID != idA || ws[0].Trigger != trigHTTP {
 		t.Fatalf("got %+v", ws)
 	}
 	if got := len(ws[0].Counts); got != 2880 {
@@ -96,21 +101,22 @@ func TestLoadAzure2019_TopNSeasonalByVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	// bbb333 is non-seasonal, ccc444 is below min rate.
-	if len(ws) != 2 || ws[0].ID != "aaa111" || ws[1].ID != "aab222" {
-		ids := []string{}
+	if len(ws) != 2 || ws[0].ID != idA || ws[1].ID != "aab222" {
+		ids := make([]string, 0, len(ws))
 		for _, w := range ws {
 			ids = append(ids, w.ID)
 		}
 		t.Fatalf("selected %v, want [aaa111 aab222]", ids)
 	}
 	ws, err = LoadAzure2019(fixtureDir, Selector{TopN: 1, MinMeanPerMin: 5})
-	if err != nil || len(ws) != 1 || ws[0].ID != "aaa111" {
+	if err != nil || len(ws) != 1 || ws[0].ID != idA {
 		t.Fatalf("top1: %v %+v", err, ws)
 	}
 }
 
 func TestLoadAzure2019_Errors(t *testing.T) {
-	if _, err := LoadAzure2019(t.TempDir(), Selector{TopN: 1}); err == nil || !strings.Contains(err.Error(), "fetch-azure2019.sh") {
+	_, err := LoadAzure2019(t.TempDir(), Selector{TopN: 1})
+	if err == nil || !strings.Contains(err.Error(), "fetch-azure2019.sh") {
 		t.Errorf("missing files error should mention fetch script, got %v", err)
 	}
 	if _, err := LoadAzure2019(fixtureDir, Selector{}); err == nil {
@@ -146,7 +152,8 @@ func TestRescaledAndSeries(t *testing.T) {
 		t.Fatalf("series = step %v len %d", s.Step, len(s.Points))
 	}
 	// At wraps and holds per minute.
-	if w.At(30*time.Second) != s.Points[0].V || w.At(2880*time.Minute) != s.Points[0].V || w.At(-time.Minute) != s.Points[2879].V {
+	first, last := s.Points[0].V, s.Points[2879].V
+	if w.At(30*time.Second) != first || w.At(2880*time.Minute) != first || w.At(-time.Minute) != last {
 		t.Error("At wrap/hold wrong")
 	}
 	if ws[0].PeakRPS() == w.PeakRPS() {
