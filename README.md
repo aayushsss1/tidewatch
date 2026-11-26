@@ -109,7 +109,7 @@ To pick the agent's model (default `claude-sonnet-5-5`), set `TIDEWATCH_LLM_MODE
 
 or `ANTHROPIC_API_KEY=... make demo` to run it without the assertions. `make demo` creates Secret `tidewatch-llm`, deploys with `--llm-provider=anthropic`, sets `agent.enabled: true` with `approval: Auto`, adds the ops note and seeds one hand-written `TideEpisode`. Without the key it prints `Act 2 skipped: set ANTHROPIC_API_KEY to run the agent` and Act 1 runs unchanged, with the same traffic shape. `make demo-e2e` runs Act 1 only: it strips `ANTHROPIC_API_KEY` from the environment, so an exported key never causes paid calls (CI uses it).
 
-**Cost:** measured at the first live run; expected to be cents per demo. <!-- TODO: fill in the measured token count (tidewatch_agent_tokens_total) and cost after the first live Act 2 run. -->
+**Cost:** the first live Act 2 run (2026-11-26, `claude-haiku-5-5`, about 28 minutes) used 245,606 input and 18,834 output tokens across 9 investigations, roughly **$0.03** at Haiku 5.5 list prices. The hourly token budget (200k) was reached partway through and skipped 33 later incidents, so a run on Sonnet 5.5 costs more but is capped by the same budget. The agent set its override 12 minutes before the flash sale started, citing the ops note and both forecast models.
 
 ## License
 
