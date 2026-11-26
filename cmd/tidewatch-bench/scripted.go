@@ -30,8 +30,9 @@ func (scriptedProvider) Turn(_ context.Context, req llm.TurnRequest) (llm.TurnRe
 	if len(req.Messages) > 0 {
 		text = req.Messages[0].Text
 	}
-	var overrides []map[string]any
-	for _, m := range reBrief.FindAllStringSubmatch(text, -1) {
+	matches := reBrief.FindAllStringSubmatch(text, -1)
+	overrides := make([]map[string]any, 0, len(matches))
+	for _, m := range matches {
 		replicas, _ := strconv.Atoi(m[2])
 		maxR, _ := strconv.Atoi(m[3])
 		floor := min(max(2*replicas, 2), maxR)
