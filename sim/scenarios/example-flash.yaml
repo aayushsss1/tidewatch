@@ -1,0 +1,37 @@
+# Example scenario: one synthetic diurnal service hit by a 3x flash sale, plus a chained
+# downstream API. Offsets are measured from the trace origin; the run starts at `start`.
+name: example-flash
+seed: 1
+trace:
+  type: synthetic:diurnal
+  base: 20
+  amp: 120
+  period: 24h
+  noise: 0.05
+  seed: 1
+start: 6h
+duration: 6h
+step: 1m
+history: 72h
+workloads:
+  - name: frontend
+    capacity: 10
+    startupDelay: 60s
+    minReplicas: 2
+    maxReplicas: 60
+  - name: api
+    capacity: 12
+    startupDelay: 45s
+    minReplicas: 2
+    maxReplicas: 60
+    lag: 90s
+    scale: 0.8
+events:
+  - kind: surge
+    start: 9h
+    ramp: 3m
+    hold: 30m
+    mult: 3
+notes:
+  - publishAt: 8h15m
+    text: "Flash sale starts at 09:00, expect ~3x traffic for about 30 minutes."
