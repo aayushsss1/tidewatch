@@ -91,6 +91,9 @@ type Investigator struct {
 	Reader      client.Reader // uncached reader for events/rollouts/notes; defaults to Client
 	Correlator  *Correlator
 	PromFactory PromFactory // defaults to prom.New
+	// Observer, when set, is called once per investigation that reaches the model
+	// and returns that investigation's llm.Limits.Observer. Nil means no overhead.
+	Observer func(incidentID string) func(llm.Turn)
 }
 
 // Result describes what an investigation did.
@@ -237,8 +240,12 @@ func (iv *Investigator) investigate(ctx context.Context, inc *Incident, deadline
 	if maxCalls <= 0 {
 		maxCalls = defaultToolCall
 	}
+	lim := llm.Limits{MaxToolCalls: maxCalls, MaxTokens: maxTokens}
+	if iv.Observer != nil {
+		lim.Observer = iv.Observer(inc.ID)
+	}
 	out, ltrace, err := llm.Run(rctx, iv.Provider, systemPrompt, Brief(inc, orderedSnaps(snaps)),
-		tools.For(iv.source(pol, inc), scopeOf(pol, inc)), llm.Limits{MaxToolCalls: maxCalls, MaxTokens: maxTokens})
+		tools.For(iv.source(pol, inc), scopeOf(pol, inc)), lim)
 	if iv.Budget != nil {
 		iv.Budget.Spend(out.InputTokens + out.OutputTokens)
 	}
