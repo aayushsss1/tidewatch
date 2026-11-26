@@ -113,11 +113,11 @@ func TestNeededFloor(t *testing.T) {
 }
 
 func TestAccountOverride(t *testing.T) {
-	c, clk := newC(1, 0)
+	c, _ := newC(1, 0)
 	k := Key{"ns", "a"}
-	c.AccountOverride(clk.Now(), 2*time.Minute, k, 3, 8, 5) // waste (8-5)*2 = 6
-	c.AccountOverride(clk.Now(), time.Minute, k, 3, 4, 6)   // 0
-	c.AccountOverride(clk.Now(), time.Minute, k, 3, 2, 1)   // violation
+	c.AccountOverride(2*time.Minute, k, 3, 8, 5) // waste (8-5)*2 = 6
+	c.AccountOverride(time.Minute, k, 3, 4, 6)   // 0
+	c.AccountOverride(time.Minute, k, 3, 2, 1)   // violation
 	m, _ := c.Metrics("ns", "a")
 	if m.OverrideWasteRM != 6 || m.SafetyViolation != 1 {
 		t.Fatalf("got %+v", m)
@@ -170,4 +170,31 @@ func TestConcurrent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestScaleEventsCountEveryChange(t *testing.T) {
+	c, clk := newC(1, -1)
+	_ = c.SetReplicas("ns", "a", 4)
+	_ = c.SetReplicas("ns", "a", 3)
+	_ = c.SetReplicas("ns", "a", 3) // no change
+	c.Account(clk.Now(), time.Minute, map[Key]float64{{"ns", "a"}: 1})
+	if m, _ := c.Metrics("ns", "a"); m.ScaleEvents != 2 {
+		t.Fatalf("got %d", m.ScaleEvents)
+	}
+}
+
+func TestScaleDownRemovesNewestBySequence(t *testing.T) {
+	c, clk := newC(1, 0) // jitter: ready times are not ordered by creation
+	_ = c.SetReplicas("ns", "a", 8)
+	clk.Step(time.Hour) // all ready
+	_ = c.SetReplicas("ns", "a", 10)
+	clk.Step(time.Hour)
+	_ = c.SetReplicas("ns", "a", 2)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range c.wls[Key{"ns", "a"}].pods {
+		if p.seq > 1 {
+			t.Fatalf("kept newer pod seq %d", p.seq)
+		}
+	}
 }

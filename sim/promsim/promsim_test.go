@@ -3,6 +3,7 @@ package promsim
 import (
 	"context"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,6 +99,29 @@ func TestUnknownQueryAllNaN(t *testing.T) {
 				t.Fatalf("%q: want NaN", q)
 			}
 		}
+	}
+}
+
+func TestConcurrentNewSharedScenario(t *testing.T) {
+	sc, err := scenario.Parse([]byte(yml), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			epoch := time.Date(2030+i, 1, 1, 0, 0, 0, 0, time.UTC)
+			s := New(sc, clocktesting.NewFakeClock(epoch.Add(6*time.Hour)), epoch, nil)
+			at := epoch.Add(6 * time.Hour)
+			got, _ := s.RangeSeries(context.Background(), `x{app="frontend"}`, at, at, time.Minute)
+			if math.IsNaN(got.Points[0].V) {
+				t.Error("NaN")
+			}
+		})
+	}
+	wg.Wait()
+	if !sc.Epoch.Equal(scenario.DefaultEpoch) {
+		t.Fatal("scenario mutated")
 	}
 }
 

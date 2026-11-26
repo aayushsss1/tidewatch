@@ -36,12 +36,11 @@ func New(sc *scenario.Scenario, clk clock.Clock, epoch time.Time, keyOf KeyFunc)
 		keyOf = AppLabelKey
 	}
 	s := &Sim{clk: clk, epoch: epoch, keyOf: keyOf, series: map[string]forecast.Series{}}
-	saved := sc.Epoch
-	sc.Epoch = epoch
-	for _, w := range sc.Workloads {
-		s.series[w.Name] = sc.Series(w.Name)
+	cp := *sc // shallow copy; Series only reads shared state
+	cp.Epoch = epoch
+	for _, w := range cp.Workloads {
+		s.series[w.Name] = cp.Series(w.Name)
 	}
-	sc.Epoch = saved
 	return s
 }
 
@@ -74,7 +73,9 @@ func AppLabelKey(q string) (string, bool) {
 	return name, name != ""
 }
 
-// RangeSeries implements prom.Querier.
+// RangeSeries implements prom.Querier. Slot semantics: the point at t is the average load
+// over (t-step, t], so serving every t <= now never leaks future data. Only equality
+// app matchers resolve; a regex app=~ matcher yields an all-NaN series.
 func (s *Sim) RangeSeries(
 	_ context.Context, q string, start, end time.Time, step time.Duration,
 ) (forecast.Series, error) {

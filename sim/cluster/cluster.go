@@ -4,6 +4,7 @@
 package cluster
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -63,14 +64,17 @@ type Metrics struct {
 	Samples         []Sample
 }
 
-type pod struct{ readyAt time.Time }
+type pod struct {
+	readyAt time.Time
+	seq     int64 // creation order
+}
 
 type wl struct {
-	spec        WorkloadSpec
-	rng         *rand.Rand
-	pods        []pod // creation order
-	lastDesired int32
-	m           Metrics
+	spec    WorkloadSpec
+	rng     *rand.Rand
+	pods    []pod // creation order
+	nextSeq int64
+	m       Metrics
 }
 
 // SimCluster is a concurrency-safe simulated cluster.
@@ -101,9 +105,10 @@ func (c *SimCluster) AddWorkload(ns, name string, spec WorkloadSpec) {
 	for _, b := range []byte(ns + "/" + name) {
 		h = (h ^ int64(b)) * 1099511628211
 	}
-	w := &wl{spec: spec, rng: rand.New(rand.NewSource(c.seed ^ h)), lastDesired: spec.Initial} //nolint:gosec // simulation
+	w := &wl{spec: spec, rng: rand.New(rand.NewSource(c.seed ^ h))} //nolint:gosec // simulation
 	for range spec.Initial {
-		w.pods = append(w.pods, pod{})
+		w.pods = append(w.pods, pod{seq: w.nextSeq})
+		w.nextSeq++
 	}
 	c.wls[k] = w
 }
@@ -139,12 +144,14 @@ func (w *wl) setReplicas(n int32, now time.Time) {
 	if n < 0 {
 		n = 0
 	}
+	before := len(w.pods)
 	for int32(len(w.pods)) < n {
-		w.pods = append(w.pods, pod{readyAt: now.Add(w.delay())})
+		w.pods = append(w.pods, pod{readyAt: now.Add(w.delay()), seq: w.nextSeq})
+		w.nextSeq++
 	}
 	if int32(len(w.pods)) > n {
-		// Remove unready pods first, then the newest ready pods: sort so the ones to keep
-		// come first (ready before unready; among ready, oldest first).
+		// Remove unready pods first, then the newest by creation order: sort so the ones to
+		// keep come first (ready before unready; then oldest creation sequence first).
 		slices.SortStableFunc(w.pods, func(a, b pod) int {
 			ra, rb := !a.readyAt.After(now), !b.readyAt.After(now)
 			if ra != rb {
@@ -153,9 +160,12 @@ func (w *wl) setReplicas(n int32, now time.Time) {
 				}
 				return 1
 			}
-			return a.readyAt.Compare(b.readyAt)
+			return cmp.Compare(a.seq, b.seq)
 		})
 		w.pods = w.pods[:n]
+	}
+	if len(w.pods) != before {
+		w.m.ScaleEvents++ // every change to desired counts, even several within one step
 	}
 }
 
@@ -200,7 +210,8 @@ func (c *SimCluster) SetReplicas(ns, name string, n int32) error {
 	return nil
 }
 
-// Account records one step of length step ending/starting at now for every workload in
+// Slot semantics: the sample for time now covers the step of load ending at now. Account
+// records one step of length step ending/starting at now for every workload in
 // load (requests per second offered during the step). Unknown keys are ignored.
 func (c *SimCluster) Account(now time.Time, step time.Duration, load map[Key]float64) {
 	mins := step.Minutes()
@@ -219,10 +230,6 @@ func (c *SimCluster) Account(now time.Time, step time.Duration, load map[Key]flo
 		}
 		w.m.OverprovRM += float64(max(0, desired-needed)) * mins
 		w.m.UnderprovRM += float64(max(0, needed-ready)) * mins
-		if desired != w.lastDesired {
-			w.m.ScaleEvents++
-			w.lastDesired = desired
-		}
 		w.m.Samples = append(w.m.Samples, Sample{T: now, Load: l, Desired: desired, Ready: ready, Needed: needed})
 	}
 }
@@ -249,8 +256,9 @@ func (c *SimCluster) Spec(ns, name string) (WorkloadSpec, bool) {
 
 // AccountOverride accumulates agent-override metrics for one step; the harness supplies
 // the baseline-vs-effective replicas. Waste is the effective replicas above both the
-// baseline and what was needed; a safety violation is effective < baseline.
-func (c *SimCluster) AccountOverride(_ time.Time, step time.Duration, k Key, baseline, effective, needed int32) {
+// baseline and what was needed; a safety violation is effective < baseline. At most one
+// violation is counted per call (one call per step).
+func (c *SimCluster) AccountOverride(step time.Duration, k Key, baseline, effective, needed int32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	w, ok := c.wls[k]
