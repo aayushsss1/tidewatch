@@ -98,6 +98,16 @@ bench: build-bench setup-envtest ## Real benchmark run (paid; needs ANTHROPIC_AP
 	@test -n "$$ANTHROPIC_API_KEY" || { echo "ANTHROPIC_API_KEY is required for make bench (use make bench-smoke for a free run)" >&2; exit 1; }
 	$(BENCH_ENV) bin/tidewatch-bench run --matrix "$(MATRIX)" --out "$(OUT)" $(BENCH_FLAGS)
 
+BENCH_VENV = bin/bench-venv
+CSV ?= $(OUT)/results.csv
+REPORT_OUT ?= $(OUT)/report
+
+.PHONY: bench-report
+bench-report: ## Render a benchmark report: make bench-report CSV=bin/bench/results.csv OUT=docs/benchmarks/<run-name> (needs python3).
+	@test -x "$(BENCH_VENV)/bin/python" || python3 -m venv "$(BENCH_VENV)"
+	@"$(BENCH_VENV)/bin/pip" install -q -r scripts/bench/requirements.txt
+	"$(BENCH_VENV)/bin/python" scripts/bench/report.py "$(CSV)" --out "$(if $(filter command line,$(origin OUT)),$(OUT),$(REPORT_OUT))"
+
 ##@ Plugin
 
 .PHONY: build-plugin

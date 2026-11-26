@@ -111,6 +111,13 @@ or `ANTHROPIC_API_KEY=... make demo` to run it without the assertions. `make dem
 
 **Cost:** the first live Act 2 run (2026-11-26, `claude-haiku-5-5`, about 28 minutes) used 245,606 input and 18,834 output tokens across 9 investigations, roughly **$0.03** at Haiku 5.5 list prices. The hourly token budget (200k) was reached partway through and skipped 33 later incidents, so a run on Sonnet 5.5 costs more but is capped by the same budget. The agent set its override 12 minutes before the flash sale started, citing the ops note and both forecast models.
 
+## Benchmarks
+
+`sim/` and `cmd/tidewatch-bench` run the real operator code against a simulated cluster and compare
+Tidewatch with HPA, KEDA, a regex rule over the ops note, and an oracle on Azure Functions 2019 traffic.
+Methodology, scenarios, threats to validity and how to reproduce are in [docs/benchmarks](docs/benchmarks/README.md).
+Results will be published there after the first full run with the agent; no numbers are claimed yet.
+
 ## License
 
 Apache-2.0
