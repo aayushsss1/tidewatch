@@ -41,6 +41,7 @@ type Selector struct {
 }
 
 const (
+	numDays        = 14
 	minutesPerDay  = 1440
 	defaultMinMean = 5.0
 	defaultMinACF  = 0.3
@@ -58,6 +59,9 @@ func (w Workload) At(off time.Duration) float64 {
 	return w.Counts[int(mod(off, n)/time.Minute)] / 60
 }
 
+// Length is the extent of the trace; At wraps beyond it.
+func (w Workload) Length() time.Duration { return time.Duration(len(w.Counts)) * time.Minute }
+
 // PeakRPS is the maximum per-minute rate in requests per second.
 func (w Workload) PeakRPS() float64 {
 	m := 0.0
@@ -67,12 +71,24 @@ func (w Workload) PeakRPS() float64 {
 	return m / 60
 }
 
-// Rescaled returns a copy scaled so that PeakRPS equals peak. The receiver is unchanged.
-// A trace that is all zero is returned as is.
+// RobustPeakRPS is the 99th percentile of the per-minute rate in requests per second. It is
+// the reference level for rescaling because single-minute outliers would otherwise dominate.
+func (w Workload) RobustPeakRPS() float64 {
+	if len(w.Counts) == 0 {
+		return 0
+	}
+	c := slices.Clone(w.Counts)
+	slices.Sort(c)
+	idx := int(math.Ceil(0.99*float64(len(c)))) - 1
+	return c[max(idx, 0)] / 60
+}
+
+// Rescaled returns a copy scaled so that RobustPeakRPS (p99) equals peak. The receiver is
+// unchanged. A trace whose p99 is zero is returned as is.
 func (w Workload) Rescaled(peak float64) Workload {
 	out := w
 	out.Counts = append([]float64(nil), w.Counts...)
-	cur := w.PeakRPS()
+	cur := w.RobustPeakRPS()
 	if cur == 0 {
 		return out
 	}
@@ -92,9 +108,12 @@ func (w Workload) Series(epoch time.Time) forecast.Series {
 	return s
 }
 
-// LoadAzure2019 reads the invocations_per_function_md.anon.dNN.csv files in dir and returns
-// the functions chosen by sel, with the days concatenated in order. Run
-// scripts/bench/fetch-azure2019.sh to populate dir.
+// LoadAzure2019 reads invocations_per_function_md.anon.d01..d14.csv in dir (all 14 are
+// required) and returns the functions chosen by sel, with the days concatenated in order.
+// The per-day files only list a function on days it was invoked, so a function absent from a
+// day is treated as zero invocations that day (zero-filled). TopN selection only considers
+// functions present in all 14 days. A Prefix selector must match exactly one function.
+// Run scripts/bench/fetch-azure2019.sh to populate dir.
 func LoadAzure2019(dir string, sel Selector) ([]Workload, error) {
 	if sel.Prefix == "" && sel.TopN <= 0 {
 		return nil, errors.New("azure2019: selector needs a function prefix or topN > 0")
@@ -110,11 +129,18 @@ func LoadAzure2019(dir string, sel Selector) ([]Workload, error) {
 }
 
 func dayFiles(dir string) ([]string, error) {
-	files, _ := filepath.Glob(filepath.Join(dir, "invocations_per_function_md.anon.d*.csv"))
-	slices.Sort(files)
-	if len(files) == 0 {
-		return nil, fmt.Errorf("azure2019: no invocations_per_function_md.anon.d*.csv in %s; "+
-			"run scripts/bench/fetch-azure2019.sh", dir)
+	files := make([]string, numDays)
+	var missing []string
+	for d := 1; d <= numDays; d++ {
+		name := fmt.Sprintf("invocations_per_function_md.anon.d%02d.csv", d)
+		files[d-1] = filepath.Join(dir, name)
+		if st, err := os.Stat(files[d-1]); err != nil || st.IsDir() {
+			missing = append(missing, fmt.Sprintf("d%02d", d))
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("azure2019: missing day files %s in %s; run scripts/bench/fetch-azure2019.sh",
+			strings.Join(missing, ","), dir)
 	}
 	return files, nil
 }
@@ -139,8 +165,8 @@ func scanFile(path string, parse func(key) bool, fn func(row)) error {
 	if err != nil {
 		return fmt.Errorf("%s: reading header: %w", path, err)
 	}
-	if cols := strings.Count(header, ",") + 1; cols != 4+minutesPerDay {
-		return fmt.Errorf("%s: header has %d columns, want %d", path, cols, 4+minutesPerDay)
+	if err := checkHeader(path, strings.TrimRight(header, "\r\n")); err != nil {
+		return err
 	}
 	for ln := 2; ; ln++ {
 		line, err := r.ReadString('\n')
@@ -172,6 +198,24 @@ func scanFile(path string, parse func(key) bool, fn func(row)) error {
 	}
 }
 
+func checkHeader(path, header string) error {
+	cols := strings.Split(header, ",")
+	if len(cols) != 4+minutesPerDay {
+		return fmt.Errorf("%s: header has %d columns, want %d", path, len(cols), 4+minutesPerDay)
+	}
+	for i, want := range []string{"HashOwner", "HashApp", "HashFunction", "Trigger"} {
+		if cols[i] != want {
+			return fmt.Errorf("%s: header column %d is %q, want %q", path, i+1, cols[i], want)
+		}
+	}
+	for i := 1; i <= minutesPerDay; i++ {
+		if cols[3+i] != strconv.Itoa(i) {
+			return fmt.Errorf("%s: header column %d is %q, want %q", path, 4+i, cols[3+i], strconv.Itoa(i))
+		}
+	}
+	return nil
+}
+
 // collect loads the full multi-day series of the wanted keys.
 func collect(files []string, want func(key) bool) ([]Workload, error) {
 	byKey := map[key]*Workload{}
@@ -187,7 +231,7 @@ func collect(files []string, want func(key) bool) ([]Workload, error) {
 				byKey[r.key] = w
 				order = append(order, r.key)
 			}
-			// Pad days where the function was absent.
+			// Days where the function was absent mean zero invocations: zero-fill.
 			for len(w.Counts) < d*minutesPerDay {
 				w.Counts = append(w.Counts, 0)
 			}
@@ -213,16 +257,22 @@ func loadByPrefix(files []string, prefix string) ([]Workload, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(out) == 0 {
+	switch len(out) {
+	case 0:
 		return nil, fmt.Errorf("azure2019: no function with HashFunction prefix %q", prefix)
+	case 1:
+		return out, nil
 	}
-	return out, nil
+	n := min(len(out), 5)
+	ids := make([]string, n)
+	for i := range n {
+		ids[i] = out[i].ID
+	}
+	return nil, fmt.Errorf("azure2019: prefix %q is ambiguous (%d functions, e.g. %s); use a longer prefix",
+		prefix, len(out), strings.Join(ids, ", "))
 }
 
 func loadTopN(files []string, sel Selector) ([]Workload, error) {
-	if len(files) < 2 {
-		return nil, errors.New("azure2019: seasonality selection needs at least 2 day files")
-	}
 	minMean, minACF := sel.MinMeanPerMin, sel.MinACF
 	if minMean <= 0 {
 		minMean = defaultMinMean
@@ -232,6 +282,7 @@ func loadTopN(files []string, sel Selector) ([]Workload, error) {
 	}
 	// Pass 1: total volume per function.
 	totals := map[key]float64{}
+	present := map[key]int{}
 	for _, path := range files {
 		err := scanFile(path, func(key) bool { return true }, func(r row) {
 			s := 0.0
@@ -239,6 +290,7 @@ func loadTopN(files []string, sel Selector) ([]Workload, error) {
 				s += c
 			}
 			totals[r.key] += s
+			present[r.key]++
 		})
 		if err != nil {
 			return nil, err
@@ -247,7 +299,7 @@ func loadTopN(files []string, sel Selector) ([]Workload, error) {
 	minTotal := minMean * float64(len(files)*minutesPerDay)
 	var cands []key
 	for k, t := range totals {
-		if t >= minTotal {
+		if t >= minTotal && present[k] == len(files) {
 			cands = append(cands, k)
 		}
 	}

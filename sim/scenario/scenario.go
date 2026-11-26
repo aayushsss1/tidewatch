@@ -2,10 +2,12 @@
 // composes the offered-load series of each workload from a trace, injected events and
 // chain lags.
 //
-// All durations in a scenario are offsets on a single time axis whose origin is the trace
-// origin (offset 0). Start is where the simulation begins; History of pre-seeded data lies
-// before it, and the run covers [Start, Start+Duration]. Events and notes are offsets on
-// the same axis. The harness picks the absolute Epoch that offset 0 maps to.
+// Convention: all offsets (start, events, notes, lags) are measured from the trace origin
+// (offset 0). Start is where measurement begins; History of pre-seeded data precedes it, so
+// Series covers [Start-History, Start+Duration]. Events and notes must fall inside that
+// window. Overlapping events multiply. Non-periodic traces (azure2019) must cover the
+// whole window (lags included) unless the trace sets wrap: true. The harness picks the
+// absolute Epoch that offset 0 maps to.
 package scenario
 
 import (
@@ -58,7 +60,9 @@ type TraceSpec struct {
 	Function      string  `yaml:"function"`
 	Rank          int     `yaml:"rank"`
 	MinMeanPerMin float64 `yaml:"minMeanPerMin"`
-	PeakRPS       float64 `yaml:"peakRPS"`
+	PeakRPS       float64 `yaml:"peakRPS"` // rescales the trace's p99 per-minute rate
+	// Wrap lets a non-periodic trace repeat when the scenario window exceeds its length.
+	Wrap bool `yaml:"wrap"`
 }
 
 // Workload is one scaled target.
@@ -244,8 +248,11 @@ func (s *Scenario) validate() error {
 	if n := len(s.Workloads); n < 1 || n > maxWorkloads {
 		return fmt.Errorf("need 1-%d workloads, got %d", maxWorkloads, n)
 	}
-	if err := s.Trace.validate("trace"); err != nil {
-		return err
+	// The top-level trace is only used when the lead workload has no trace of its own.
+	if s.Workloads[0].Trace == nil || s.Trace.Type != "" {
+		if err := s.Trace.validate("trace"); err != nil {
+			return err
+		}
 	}
 	if err := s.validateWorkloads(); err != nil {
 		return err
@@ -284,6 +291,7 @@ func (s *Scenario) validateWorkloads() error {
 }
 
 func (s *Scenario) validateEventsAndNotes() error {
+	lo, hi := s.Start-s.History, s.Start+s.Duration
 	for i, e := range s.Events {
 		where := fmt.Sprintf("events[%d]", i)
 		switch {
@@ -295,11 +303,16 @@ func (s *Scenario) validateEventsAndNotes() error {
 			return fmt.Errorf("%s: mult must be > 0", where)
 		case e.Ramp+e.Hold == 0:
 			return fmt.Errorf("%s: ramp + hold must be > 0", where)
+		case e.Start < lo || e.Start > hi:
+			return fmt.Errorf("%s: start %v is outside the scenario window [%v, %v]", where, e.Start, lo, hi)
 		}
 	}
 	for i, n := range s.NoteSpecs {
 		if n.PublishAt < 0 {
 			return fmt.Errorf("notes[%d]: publishAt must be >= 0", i)
+		}
+		if n.PublishAt < lo || n.PublishAt > hi {
+			return fmt.Errorf("notes[%d]: publishAt %v is outside the scenario window [%v, %v]", i, n.PublishAt, lo, hi)
 		}
 		if strings.TrimSpace(n.Text) == "" {
 			return fmt.Errorf("notes[%d]: text is required", i)
@@ -308,21 +321,32 @@ func (s *Scenario) validateEventsAndNotes() error {
 	return nil
 }
 
-// resolve builds the per-workload sources, loading Azure data where needed.
+// resolve builds the per-workload sources, loading Azure data where needed, and checks
+// that non-periodic traces cover the window each workload reads.
 func (s *Scenario) resolve(azureDir string) error {
 	cache := map[string][]trace.Workload{}
-	build := func(spec TraceSpec) (trace.Source, error) {
-		return buildTrace(spec, azureDir, cache)
-	}
-	leadTrace, err := build(s.Trace)
-	if err != nil {
-		return fmt.Errorf("trace: %w", err)
+	lo, hi := s.Start-s.History, s.Start+s.Duration
+	// build returns the source and checks coverage of [lo-lag, hi-lag].
+	build := func(spec TraceSpec, lag time.Duration, where string) (trace.Source, error) {
+		src, length, err := buildTrace(spec, azureDir, cache)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", where, err)
+		}
+		if length > 0 && !spec.Wrap && (lo-lag < 0 || hi-lag > length) {
+			return nil, fmt.Errorf("%s: window [%v, %v] (lag %v) exceeds the trace length %v; "+
+				"adjust start/history/duration or set wrap: true", where, lo-lag, hi-lag, lag, length)
+		}
+		return src, nil
 	}
 	lead := s.Workloads[0]
+	spec := s.Trace
+	where := "trace"
 	if lead.Trace != nil {
-		if leadTrace, err = build(*lead.Trace); err != nil {
-			return fmt.Errorf("workloads[0] trace: %w", err)
-		}
+		spec, where = *lead.Trace, "workloads[0] trace"
+	}
+	leadTrace, err := build(spec, 0, where)
+	if err != nil {
+		return err
 	}
 	events := s.Events
 	leadSrc := sourceFunc(func(t time.Duration) float64 {
@@ -337,9 +361,12 @@ func (s *Scenario) resolve(azureDir string) error {
 		w := s.Workloads[i]
 		var base trace.Source = leadSrc
 		if w.Trace != nil {
-			if base, err = build(*w.Trace); err != nil {
-				return fmt.Errorf("workloads[%d] (%q) trace: %w", i, w.Name, err)
+			if base, err = build(*w.Trace, w.Lag, fmt.Sprintf("workloads[%d] (%q) trace", i, w.Name)); err != nil {
+				return err
 			}
+		} else if spec.Type == TraceAzure2019 && !spec.Wrap && lo-w.Lag < 0 {
+			return fmt.Errorf("workloads[%d] (%q): lag %v reads before the trace origin (window starts at %v)",
+				i, w.Name, w.Lag, lo)
 		}
 		lag, scale := w.Lag, w.Scale
 		s.sources[w.Name] = sourceFunc(func(t time.Duration) float64 { return scale * base.At(t-lag) })
@@ -351,13 +378,15 @@ type sourceFunc func(time.Duration) float64
 
 func (f sourceFunc) At(t time.Duration) float64 { return f(t) }
 
-func buildTrace(spec TraceSpec, azureDir string, cache map[string][]trace.Workload) (trace.Source, error) {
+// buildTrace returns the source and its length (0 for periodic sources).
+func buildTrace(spec TraceSpec, azureDir string,
+	cache map[string][]trace.Workload) (trace.Source, time.Duration, error) {
 	if spec.Type == TraceSynthetic {
 		period := spec.Period
 		if period == 0 {
 			period = defaultPeriod
 		}
-		return trace.Diurnal{Base: spec.Base, Amp: spec.Amp, Period: period, Noise: spec.Noise, Seed: spec.Seed}, nil
+		return trace.Diurnal{Base: spec.Base, Amp: spec.Amp, Period: period, Noise: spec.Noise, Seed: spec.Seed}, 0, nil
 	}
 	sel := trace.Selector{Prefix: spec.Function, MinMeanPerMin: spec.MinMeanPerMin}
 	if spec.Function == "" {
@@ -368,7 +397,7 @@ func buildTrace(spec TraceSpec, azureDir string, cache map[string][]trace.Worklo
 	if !ok {
 		var err error
 		if ws, err = trace.LoadAzure2019(azureDir, sel); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		cache[key] = ws
 	}
@@ -376,14 +405,15 @@ func buildTrace(spec TraceSpec, azureDir string, cache map[string][]trace.Worklo
 	if spec.Function == "" {
 		idx = spec.Rank
 		if idx >= len(ws) {
-			return nil, fmt.Errorf("azure2019: rank %d requested but only %d seasonal functions qualify", spec.Rank, len(ws))
+			return nil, 0, fmt.Errorf("azure2019: rank %d requested but only %d seasonal functions qualify",
+				spec.Rank, len(ws))
 		}
 	}
 	w := ws[idx]
 	if spec.PeakRPS > 0 {
 		w = w.Rescaled(spec.PeakRPS)
 	}
-	return w, nil
+	return w, w.Length(), nil
 }
 
 // Workload returns the named workload spec.

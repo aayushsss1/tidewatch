@@ -1,9 +1,11 @@
 package scenario
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -199,31 +201,117 @@ func TestValidationErrors(t *testing.T) {
 	}
 }
 
-func TestAzureTraceResolves(t *testing.T) {
+func writeAzureDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
-	hdr := "HashOwner,HashApp,HashFunction,Trigger" + strings.Repeat(",1", 1440) + "\n"
+	hdr := "HashOwner,HashApp,HashFunction,Trigger"
+	for i := 1; i <= 1440; i++ {
+		hdr += "," + strconv.Itoa(i)
+	}
 	rowStr := "o,a,fnabc,http" + strings.Repeat(",60", 1440) + "\n"
-	for _, d := range []string{"d01", "d02"} {
-		name := filepath.Join(dir, "invocations_per_function_md.anon."+d+".csv")
-		if err := os.WriteFile(name, []byte(hdr+rowStr), 0o644); err != nil {
+	for d := 1; d <= 14; d++ {
+		name := filepath.Join(dir, fmt.Sprintf("invocations_per_function_md.anon.d%02d.csv", d))
+		if err := os.WriteFile(name, []byte(hdr+"\n"+rowStr), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	y := `
+	return dir
+}
+
+const azureYAML = `
 name: az
 trace: {type: azure2019, function: fnab, peakRPS: 40}
+start: 2h
+history: 1h
 duration: 1h
 workloads: [{name: a, capacity: 1}]
 `
-	s, err := Parse([]byte(y), dir)
+
+func TestAzureTraceResolves(t *testing.T) {
+	dir := writeAzureDir(t)
+	s, err := Parse([]byte(azureYAML), dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := at(t, s, "a", 10*time.Minute); !near(got, 40) {
+	if got := at(t, s, "a", 2*time.Hour+10*time.Minute); !near(got, 40) {
 		t.Errorf("rescaled rps = %v, want 40", got)
 	}
-	if _, err := Parse([]byte(y), t.TempDir()); err == nil || !strings.Contains(err.Error(), "fetch-azure2019") {
+	if _, err := Parse([]byte(azureYAML), t.TempDir()); err == nil || !strings.Contains(err.Error(), "fetch-azure2019") {
 		t.Errorf("missing data err = %v", err)
+	}
+}
+
+func TestAzureWindowMustFitTrace(t *testing.T) {
+	dir := writeAzureDir(t)
+	cases := map[string]string{
+		"before origin": strings.Replace(azureYAML, "start: 2h", "start: 30m", 1),
+		"past end":      strings.Replace(azureYAML, "duration: 1h", "duration: 400h", 1),
+	}
+	for name, y := range cases {
+		if _, err := Parse([]byte(y), dir); err == nil || !strings.Contains(err.Error(), "wrap") {
+			t.Errorf("%s: err = %v, want window error mentioning wrap", name, err)
+		}
+		wrapped := strings.Replace(y, "peakRPS: 40", "peakRPS: 40, wrap: true", 1)
+		if _, err := Parse([]byte(wrapped), dir); err != nil {
+			t.Errorf("%s with wrap: %v", name, err)
+		}
+	}
+}
+
+func TestAzureLagBeforeOriginRejected(t *testing.T) {
+	y := strings.Replace(azureYAML, "workloads: [{name: a, capacity: 1}]",
+		"workloads: [{name: a, capacity: 1}, {name: b, capacity: 1, lag: 90m}]", 1)
+	if _, err := Parse([]byte(y), writeAzureDir(t)); err == nil || !strings.Contains(err.Error(), "lag") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestTopLevelTraceNotLoadedWhenAllOverride(t *testing.T) {
+	y := `
+name: ov
+trace: {type: azure2019, function: nothere}
+start: 1h
+duration: 1h
+history: 0s
+workloads:
+  - name: a
+    capacity: 1
+    trace: {type: synthetic:diurnal, base: 4}
+`
+	s, err := Parse([]byte(y), t.TempDir()) // empty azure dir: would fail if loaded
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := at(t, s, "a", time.Hour); !near(got, 4) {
+		t.Errorf("got %v", got)
+	}
+}
+
+func TestEventAndNoteOutsideWindow(t *testing.T) {
+	cases := map[string]struct{ old, repl string }{
+		"event before": {"start: 7h\n    ramp", "start: 1h\n    ramp"},
+		"event after":  {"start: 7h\n    ramp", "start: 9h\n    ramp"},
+		"note after":   {"publishAt: 7h30m", "publishAt: 20h"},
+		"note before":  {"publishAt: 6h30m", "publishAt: 1h"},
+	}
+	for name, c := range cases {
+		_, err := Parse([]byte(strings.Replace(flat, c.old, c.repl, 1)), "")
+		if err == nil || !strings.Contains(err.Error(), "outside the scenario window") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
+
+func TestOverlappingEventsMultiply(t *testing.T) {
+	y := strings.Replace(flat, "notes:", `  - kind: surge
+    start: 7h
+    ramp: 0s
+    hold: 30m
+    mult: 2
+notes:`, 1)
+	s := parse(t, y)
+	if got := at(t, s, "frontend", 7*time.Hour+15*time.Minute); !near(got, 10*5*2) {
+		t.Errorf("got %v, want 100", got)
 	}
 }
 

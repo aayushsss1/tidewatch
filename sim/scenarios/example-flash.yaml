@@ -1,5 +1,10 @@
 # Example scenario: one synthetic diurnal service hit by a 3x flash sale, plus a chained
-# downstream API. Offsets are measured from the trace origin; the run starts at `start`.
+# downstream API.
+# Convention: every offset (start, events, notes, lag) is measured from the trace origin.
+# `start` is where measurement begins; `history` precedes it, so the series covers
+# [start - history, start + duration]. Events and notes must fall inside that window.
+# Overlapping events multiply. Non-periodic traces (azure2019) must cover the window or set
+# `wrap: true`.
 name: example-flash
 seed: 1
 trace:
