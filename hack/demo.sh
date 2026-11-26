@@ -80,6 +80,15 @@ if [ "$ACT2" = true ]; then
     --from-file=apiKey=/dev/stdin --dry-run=client -o yaml | k apply -f - >/dev/null
   PATCH="$PATCH"',
        {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--llm-provider=anthropic"}'
+  # Optional model override, e.g. TIDEWATCH_LLM_MODEL=claude-haiku-5-5 (default: the operator's --llm-model).
+  if [ -n "${TIDEWATCH_LLM_MODEL:-}" ]; then
+    case "$TIDEWATCH_LLM_MODEL" in
+      *[!a-z0-9.-]*) echo "TIDEWATCH_LLM_MODEL has unexpected characters: $TIDEWATCH_LLM_MODEL" >&2; exit 1 ;;
+    esac
+    echo "agent model: $TIDEWATCH_LLM_MODEL"
+    PATCH="$PATCH"',
+       {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--llm-model='"$TIDEWATCH_LLM_MODEL"'"}'
+  fi
 fi
 k -n tidewatch-system patch deployment "$OP_DEPLOY" --type=json -p "$PATCH]"
 k -n tidewatch-system rollout status "deployment/$OP_DEPLOY" --timeout=3m

@@ -105,6 +105,8 @@ export ANTHROPIC_API_KEY=...          # this makes paid LLM calls
 make demo-down demo-e2e-act2          # about 30 minutes; asserts the agent's override and the ghost metric
 ```
 
+To pick the agent's model (default `claude-sonnet-5-5`), set `TIDEWATCH_LLM_MODEL`, e.g. `TIDEWATCH_LLM_MODEL=claude-haiku-5-5` for the cheapest run.
+
 or `ANTHROPIC_API_KEY=... make demo` to run it without the assertions. `make demo` creates Secret `tidewatch-llm`, deploys with `--llm-provider=anthropic`, sets `agent.enabled: true` with `approval: Auto`, adds the ops note and seeds one hand-written `TideEpisode`. Without the key it prints `Act 2 skipped: set ANTHROPIC_API_KEY to run the agent` and Act 1 runs unchanged, with the same traffic shape. `make demo-e2e` runs Act 1 only: it strips `ANTHROPIC_API_KEY` from the environment, so an exported key never causes paid calls (CI uses it).
 
 **Cost:** measured at the first live run; expected to be cents per demo. <!-- TODO: fill in the measured token count (tidewatch_agent_tokens_total) and cost after the first live Act 2 run. -->
