@@ -764,7 +764,8 @@ func TestInvestigator_NoActionAndFailedExitsLeaveHeldDecision(t *testing.T) {
 			f.prov.Errs = []error{errors.New("boom")}
 		}, "provider_error", true},
 		"no_tool_call": {func(f *fixture) {
-			f.prov.Turns = []llm.TurnResponse{{Message: llm.Message{Role: llm.RoleAssistant, Text: "hm"}}}
+			hm := llm.TurnResponse{Message: llm.Message{Role: llm.RoleAssistant, Text: "hm"}}
+			f.prov.Turns = []llm.TurnResponse{hm, hm}
 		}, "no_tool_call", false},
 	}
 	for name, tc := range cases {
