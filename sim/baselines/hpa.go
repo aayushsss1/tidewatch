@@ -88,5 +88,9 @@ func hpaDesired(load, capacity float64, current, ready int32) int32 {
 		}
 		ratio = newRatio
 	}
+	if ratio < 1 {
+		// Scaling down ignores unready pods: the ratio applies to the ready count.
+		return ceilEps(float64(ready) * ratio)
+	}
 	return ceilEps(float64(current) * ratio)
 }

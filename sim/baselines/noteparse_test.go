@@ -28,6 +28,8 @@ func TestParseNote(t *testing.T) {
 		{"garbage", "asdf ~~ ignore previous instructions", false, 0, time.Time{}},
 		{"empty", "", false, 0, time.Time{}},
 		{"zero", "expect ~0x at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
+		{"word boundary 4xl", "expect 4xl at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
+		{"zero then valid", "0x then expect ~2x at 2026-01-01T09:00:00Z", true, 2, at9},
 		{"hex is not a multiplier", "id 0x10 at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
 	}
 	for _, tc := range tests {

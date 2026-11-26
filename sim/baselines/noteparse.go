@@ -19,11 +19,13 @@ type NoteEvent struct {
 
 var (
 	// "expect ~4×", "expect 4x"; checked first so the stated forecast wins over other numbers.
-	reExpect = regexp.MustCompile(`(?i)expect\w*\s*~?\s*(\d+(?:\.\d+)?)\s*[x×]`)
-	// "4×", "4x", "4 x" (not "0x10": the x must end the token).
+	// Every multiplier must be followed by a non-word character (or the end) so that "4xl",
+	// "4x4" and "0x10" are not read as multipliers.
+	reExpect = regexp.MustCompile(`(?i)expect\w*\s*~?\s*(\d+(?:\.\d+)?)\s*[x×](?:[^\w]|$)`)
+	// "4×", "4x", "4 x".
 	reNx = regexp.MustCompile(`(?i)(?:^|[^\w.])~?(\d+(?:\.\d+)?)\s*[x×](?:[^\w]|$)`)
 	// "×4", "x4".
-	reXn    = regexp.MustCompile(`(?i)(?:^|[^\w])[x×]\s*(\d+(?:\.\d+)?)`)
+	reXn    = regexp.MustCompile(`(?i)(?:^|[^\w])[x×]\s*(\d+(?:\.\d+)?)(?:[^\w]|$)`)
 	reRFC   = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})`)
 	reClock = regexp.MustCompile(`(?:^|[^\d])(\d{1,2}):(\d{2})(?:[^\d:]|$)`)
 )
@@ -31,18 +33,21 @@ var (
 // ParseNote extracts the multiplier and event time from an ops note published at
 // publishedAt. The time is an RFC3339 timestamp; failing that, a bare HH:MM is read as UTC
 // and resolved to its next occurrence at or after publishedAt (the example scenarios'
-// notes say "starts at 09:00"). A note with no multiplier, a non-positive one, or no time
+// notes say "starts at 09:00"). Not supported: relative times ("in 20 minutes"), 12-hour
+// clock times ("9am"), dates without a clock time, and time zones on bare HH:MM. A note
+// with no multiplier, a non-positive one, or no time
 // does not parse. A parsed note is followed literally, however implausible.
 func ParseNote(text string, publishedAt time.Time) (NoteEvent, bool) {
 	var mult float64
 	for _, re := range []*regexp.Regexp{reExpect, reNx, reXn} {
-		if m := re.FindStringSubmatch(text); m != nil {
-			v, err := strconv.ParseFloat(m[1], 64)
-			if err == nil && v > 0 {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			if v, err := strconv.ParseFloat(m[1], 64); err == nil && v > 0 {
 				mult = v
 				break
 			}
-			return NoteEvent{}, false
+		}
+		if mult > 0 {
+			break
 		}
 	}
 	if mult == 0 {

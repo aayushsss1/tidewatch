@@ -1,21 +1,14 @@
 package baselines
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"time"
 
+	"github.com/aayushsss1/tidewatch/pkg/llm"
 	"github.com/aayushsss1/tidewatch/sim/harness"
 	"github.com/aayushsss1/tidewatch/sim/scenario"
 )
-
-// Entry is a configuration by name. Controller is set for the baselines that act on
-// SimCluster directly (pass it as harness.Options.Controller together with an empty
-// Config); otherwise the config is a Tidewatch run. For "tidewatch-agent" the caller must
-// set Config.Provider and Config.Model.
-type Entry struct {
-	Config     harness.Config
-	Controller harness.Controller
-}
 
 // Configuration names.
 const (
@@ -35,30 +28,58 @@ func Names() []string {
 	}
 }
 
-// ByName builds the named configuration for a scenario's workloads. Each call returns
-// fresh controller state, so call it once per run. step is the scenario step, used by the
-// regex rule's window margin.
-func ByName(name string, ws []scenario.Workload) (Entry, error) {
-	return ByNameStep(name, ws, time.Minute)
+// Options configures New.
+type Options struct {
+	// Provider and Model are required for tidewatch-agent and ignored otherwise.
+	Provider llm.Provider
+	Model    string
+	// Guardrails is the Tidewatch profile (regex-rule, tidewatch-*); empty is the
+	// benchmark default, harness.GuardrailsMatched.
+	Guardrails harness.Guardrails
 }
 
-// ByNameStep is ByName with an explicit scenario step.
-func ByNameStep(name string, ws []scenario.Workload, step time.Duration) (Entry, error) {
+// Entry is a runnable configuration. An Entry holds controller state, so use it for one
+// run only and call New again for the next.
+type Entry struct {
+	Name       string
+	Config     harness.Config
+	Controller harness.Controller // set for baselines that act on SimCluster directly
+}
+
+// Run simulates sc under the entry, whether it is a Controller or a Tidewatch config.
+func (e Entry) Run(
+	ctx context.Context, sc *scenario.Scenario, repeat int, opts harness.Options,
+) (harness.Result, error) {
+	if e.Controller != nil {
+		opts.Controller = e.Controller
+	}
+	return harness.Run(ctx, sc, e.Config, repeat, opts)
+}
+
+// New builds the named configuration for sc's workloads. Each call returns fresh state.
+func New(name string, sc *scenario.Scenario, opts Options) (Entry, error) {
+	ws := sc.Workloads
+	tw := harness.Config{Name: name, Guardrails: opts.Guardrails}
 	switch name {
 	case NameHPA:
-		return Entry{Controller: NewHPA(ws)}, nil
+		return Entry{Name: name, Controller: NewHPA(ws)}, nil
 	case NameKEDAProm:
-		return Entry{Controller: NewKEDAPrometheus(ws)}, nil
+		return Entry{Name: name, Controller: NewKEDAPrometheus(ws)}, nil
 	case NameKEDACron:
-		return Entry{Controller: NewKEDACron(ws)}, nil
+		return Entry{Name: name, Controller: NewKEDACron(ws)}, nil
 	case NameOracle:
-		return Entry{Controller: NewOracle(ws)}, nil
+		return Entry{Name: name, Controller: NewOracle(ws)}, nil
 	case NameRegexRule:
-		return Entry{Config: harness.Config{Name: name, RuleOverrides: RegexRuleOverrides(step)}}, nil
+		tw.RuleOverrides = RegexRuleOverrides(sc.Step)
+		return Entry{Name: name, Config: tw}, nil
 	case NameTWBaseline:
-		return Entry{Config: harness.Config{Name: name}}, nil
+		return Entry{Name: name, Config: tw}, nil
 	case NameTWAgent:
-		return Entry{Config: harness.Config{Name: name, Agent: true}}, nil
+		if opts.Provider == nil {
+			return Entry{}, errors.New("baselines: tidewatch-agent needs a Provider")
+		}
+		tw.Agent, tw.Provider, tw.Model = true, opts.Provider, opts.Model
+		return Entry{Name: name, Config: tw}, nil
 	}
 	return Entry{}, fmt.Errorf("baselines: unknown config %q (want one of %v)", name, Names())
 }

@@ -17,7 +17,11 @@ import (
 // Simplifications:
 //   - KEDA polls every 30s. The scenario series value at t is already a trailing 1m
 //     average (the lag of rate(...[1m])), and the metric is refreshed only at 30s
-//     boundaries (absolute time), so with a step shorter than 30s it goes stale.
+//     boundaries (absolute time), so with a step shorter than 30s it goes stale. At the
+//     default 1m step the refresh is a no-op: the series changes once per step and every
+//     step starts on a 30s boundary.
+//   - Lead time (deliberate asymmetry with the regex rule): the cron window opens at a
+//     fixed E-15m regardless of how long pods take to start.
 //   - The HPA synchronizes every 15s with the same tolerance (0.1), scale-up policy
 //     (max(100%, 4 pods) per 15s), scale-down policy and 300s stabilization as HPA.
 //   - minReplicas >= 1 in every scenario, so KEDA's cooldownPeriod (scale to zero only)

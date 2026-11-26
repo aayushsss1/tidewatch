@@ -12,31 +12,57 @@ import (
 	"github.com/aayushsss1/tidewatch/sim/scenario"
 )
 
-// flatScenario is a flat 100 rps service (capacity 10/pod, so 13 pods at 0.8 headroom)
-// hit by a surge of mult at 1h20m for hold. The run covers 1h..2h; note is optional.
-func flatScenario(t *testing.T, step string, mult float64, hold, note string) *scenario.Scenario {
+// flatOpts configures a flat 100 rps service (capacity 10/pod, so 13 pods at 0.8 headroom)
+// hit by a surge. The measured run is [start, start+dur]; the surge starts 20m in.
+type flatOpts struct {
+	step, hold, note string
+	mult             float64
+	start, history   time.Duration // default 1h / 1h
+	dur              time.Duration // default 1h
+	maxReplicas      int           // default 1000
+	startup          string        // default 30s
+}
+
+func (o flatOpts) scenario(t *testing.T) *scenario.Scenario {
 	t.Helper()
+	d := func(v, def time.Duration) time.Duration {
+		if v == 0 {
+			return def
+		}
+		return v
+	}
+	start, hist, dur := d(o.start, time.Hour), d(o.history, time.Hour), d(o.dur, time.Hour)
+	if o.maxReplicas == 0 {
+		o.maxReplicas = 1000
+	}
+	if o.startup == "" {
+		o.startup = "30s"
+	}
 	y := fmt.Sprintf(`
 name: flat
 seed: 1
 trace: {type: "synthetic:diurnal", base: 100, amp: 0, noise: 0}
-start: 1h
-duration: 1h
+start: %v
+duration: %v
 step: %s
-history: 1h
+history: %v
 workloads:
-  - {name: svc, capacity: 10, startupDelay: 30s, minReplicas: 2, maxReplicas: 1000}
+  - {name: svc, capacity: 10, startupDelay: %s, minReplicas: 2, maxReplicas: %d}
 events:
-  - {kind: surge, start: 1h20m, ramp: %s, hold: %s, mult: %v}
-`, step, step, hold, mult)
-	if note != "" {
-		y += fmt.Sprintf("notes:\n  - {publishAt: 1h5m, text: %q}\n", note)
+  - {kind: surge, start: %v, ramp: %s, hold: %s, mult: %v}
+`, start, dur, o.step, hist, o.startup, o.maxReplicas, start+20*time.Minute, o.step, o.hold, o.mult)
+	if o.note != "" {
+		y += fmt.Sprintf("notes:\n  - {publishAt: %v, text: %q}\n", start+5*time.Minute, o.note)
 	}
 	sc, err := scenario.Parse([]byte(y), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return sc
+}
+
+func flatScenario(t *testing.T, step string, mult float64, hold, note string) *scenario.Scenario {
+	return flatOpts{step: step, mult: mult, hold: hold, note: note}.scenario(t)
 }
 
 func runCtl(t *testing.T, sc *scenario.Scenario, c harness.Controller) []cluster.Sample {
@@ -59,6 +85,8 @@ func at(t *testing.T, ss []cluster.Sample, sc *scenario.Scenario, off time.Durat
 	t.Fatalf("no sample at %v", off)
 	return cluster.Sample{}
 }
+
+const trueNoteEarly = "Flash sale at 2026-01-01T01:20:00Z, expect ~4× traffic."
 
 func TestHPA_ScalesUpUnderPolicyLimit(t *testing.T) {
 	sc := flatScenario(t, "1m", 20, "30m", "")
@@ -150,7 +178,7 @@ func TestKEDAPrometheus_ReactsAt30sGranularity(t *testing.T) {
 }
 
 func TestKEDACron_AppliesNoteWindow(t *testing.T) {
-	note := "Flash sale at 2026-01-01T01:20:00Z, expect ~4× traffic."
+	note := trueNoteEarly
 	sc := flatScenario(t, "1m", 4, "30m", note)
 	ss := runCtl(t, sc, baselines.NewKEDACron(sc.Workloads))
 	// desired = ceil(4 x 100 / (10 x 0.8)) = 50 from 01:05 to 02:20.
@@ -187,21 +215,94 @@ func TestOracle_NoBreaches(t *testing.T) {
 	}
 }
 
-func TestByName(t *testing.T) {
+func TestNew(t *testing.T) {
 	sc := flatScenario(t, "1m", 4, "30m", "")
 	for _, n := range baselines.Names() {
-		e, err := baselines.ByName(n, sc.Workloads)
+		e, err := baselines.New(n, sc, baselines.Options{Provider: &scriptedProvider{}})
 		if err != nil {
 			t.Fatalf("%s: %v", n, err)
 		}
-		if e.Config.Name == "" && e.Controller == nil {
-			t.Fatalf("%s: empty entry", n)
+		if e.Name != n || (e.Controller == nil) == (e.Config.Name == "") {
+			t.Fatalf("%s: bad entry %+v", n, e)
 		}
 	}
 	if len(baselines.Names()) != 7 {
 		t.Fatalf("names = %v", baselines.Names())
 	}
-	if _, err := baselines.ByName("nope", sc.Workloads); err == nil {
+	if _, err := baselines.New("nope", sc, baselines.Options{}); err == nil {
 		t.Fatal("unknown name should error")
+	}
+	if _, err := baselines.New(baselines.NameTWAgent, sc, baselines.Options{}); err == nil {
+		t.Fatal("tidewatch-agent without a provider should error")
+	}
+}
+
+func TestHPA_NoCompoundingWhenStartupExceedsStep(t *testing.T) {
+	// Startup 150s is longer than the 1m step: pods ordered in one step are still unready in
+	// the next. The target must not compound; needed at 400 rps is 50.
+	sc := flatOpts{step: "1m", mult: 4, hold: "30m", startup: "150s"}.scenario(t)
+	peak := int32(0)
+	for _, s := range runCtl(t, sc, baselines.NewHPA(sc.Workloads)) {
+		peak = max(peak, s.Desired)
+	}
+	if peak > 52 {
+		t.Fatalf("peak replicas %d, want about 50 (no compounding)", peak)
+	}
+}
+
+func breachOf(ss []cluster.Sample) (n float64) {
+	for _, s := range ss {
+		if s.Load > float64(s.Ready)*10 {
+			n++
+		}
+	}
+	return n
+}
+
+func TestKEDACron_WrongTimeNoBetterThanHPA(t *testing.T) {
+	note := "Flash sale at 2026-01-01T01:45:00Z, expect ~4× traffic." // the surge is at 01:20
+	sc := flatScenario(t, "1m", 4, "30m", note)
+	cron := breachOf(runCtl(t, sc, baselines.NewKEDACron(sc.Workloads)))
+	hpa := breachOf(runCtl(t, sc, baselines.NewHPA(sc.Workloads)))
+	if cron < hpa {
+		t.Fatalf("cron with a wrong-time note breached %v min, HPA %v: cron must not help", cron, hpa)
+	}
+}
+
+func TestKEDACron_WindowReleasesAfterHoldAndStabilization(t *testing.T) {
+	note := trueNoteEarly
+	sc := flatOpts{step: "1m", mult: 4, hold: "10m", note: note, dur: 90 * time.Minute}.scenario(t)
+	ss := runCtl(t, sc, baselines.NewKEDACron(sc.Workloads))
+	// Window [01:05, 02:20]; load is back to 100 rps by 01:31, so the Prometheus level is 13.
+	if got := at(t, ss, sc, 2*time.Hour+15*time.Minute).Desired; got != 50 {
+		t.Fatalf("inside the window at 02:15 replicas = %d, want 50", got)
+	}
+	// 300s after the window closes the stabilization no longer holds the cron level.
+	if got := at(t, ss, sc, 2*time.Hour+27*time.Minute).Desired; got != 13 {
+		t.Fatalf("at 02:27 replicas = %d, want back at the Prometheus level 13", got)
+	}
+}
+
+func TestKEDACron_NoLeakage(t *testing.T) {
+	// The scenarios differ only after 01:20 (surge x4 vs x8). Same note, same publish
+	// time: cron must act identically until the surge shows in the series.
+	note := trueNoteEarly
+	a := flatScenario(t, "1m", 4, "30m", note)
+	b := flatScenario(t, "1m", 8, "30m", note)
+	sa := runCtl(t, a, baselines.NewKEDACron(a.Workloads))
+	sb := runCtl(t, b, baselines.NewKEDACron(b.Workloads))
+	n := 0
+	for i := range sa {
+		if sa[i].T.After(a.Epoch.Add(time.Hour + 20*time.Minute)) {
+			break
+		}
+		if sa[i].Desired != sb[i].Desired {
+			t.Fatalf("at %v desired %d vs %d: cron used post-cutoff information",
+				sa[i].T, sa[i].Desired, sb[i].Desired)
+		}
+		n++
+	}
+	if n < 20 {
+		t.Fatalf("compared only %d steps", n)
 	}
 }

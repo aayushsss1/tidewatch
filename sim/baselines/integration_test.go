@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aayushsss1/tidewatch/internal/engine"
 	"github.com/aayushsss1/tidewatch/pkg/llm"
 	"github.com/aayushsss1/tidewatch/sim/baselines"
 	"github.com/aayushsss1/tidewatch/sim/cluster"
@@ -62,14 +64,15 @@ func (p *scriptedProvider) Turn(_ context.Context, req llm.TurnRequest) (llm.Tur
 
 func runConfig(t *testing.T, sc *scenario.Scenario, name string) harness.Result {
 	t.Helper()
-	e, err := baselines.ByNameStep(name, sc.Workloads, sc.Step)
+	opts := baselines.Options{}
+	if name == baselines.NameTWAgent {
+		opts.Provider = &scriptedProvider{floor: 55, end: sc.Epoch.Add(9*time.Hour + 40*time.Minute)}
+	}
+	e, err := baselines.New(name, sc, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if e.Config.Agent {
-		e.Config.Provider = &scriptedProvider{floor: 55, end: sc.Epoch.Add(9*time.Hour + 40*time.Minute)}
-	}
-	res, err := harness.Run(context.Background(), sc, e.Config, 0, harness.Options{Controller: e.Controller})
+	res, err := e.Run(context.Background(), sc, 0, harness.Options{})
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
@@ -146,5 +149,126 @@ func TestAllConfigs_ExampleFlash(t *testing.T) {
 	}
 	if breach["hpa"] <= breach["oracle"] {
 		t.Errorf("hpa breach %v should exceed the oracle's %v on a flash sale", breach["hpa"], breach["oracle"])
+	}
+}
+
+// flatTW is a flat service with enough history for the engine's forecaster: the run is
+// 49h..50h and the surge starts at 49h20m (2026-01-03T01:20Z), announced at 49h05m.
+func flatTW(t *testing.T, mult float64, note string, maxReplicas int) *scenario.Scenario {
+	return flatOpts{
+		step: "1m", mult: mult, hold: "30m", note: note, start: 49 * time.Hour, history: 48 * time.Hour,
+		maxReplicas: maxReplicas,
+	}.scenario(t)
+}
+
+const trueNote = "Flash sale at 2026-01-03T01:20:00Z, expect ~4× traffic."
+
+func runNamed(
+	t *testing.T, sc *scenario.Scenario, name string, hook func(harness.Config) harness.Config,
+) harness.Result {
+	t.Helper()
+	e, err := baselines.New(name, sc, baselines.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hook != nil {
+		e.Config = hook(e.Config)
+	}
+	res, err := e.Run(context.Background(), sc, 0, harness.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestRegexRule_BeatsBaselineOnTrueNote(t *testing.T) {
+	sc := flatTW(t, 4, trueNote, 1000)
+	base := runNamed(t, sc, baselines.NameTWBaseline, nil)
+	rule := runNamed(t, sc, baselines.NameRegexRule, nil)
+	bb, _, _ := sumMetrics(base)
+	rb, lift, viol := sumMetrics(rule)
+	if rb >= bb {
+		t.Fatalf("rule breach %v, baseline %v: the rule must be strictly better on a true x4 note", rb, bb)
+	}
+	if viol != 0 || lift <= 0 || rule.SkippedSteps != 0 || rule.Guardrails != harness.GuardrailsMatched {
+		t.Fatalf("violations %d lift %v skipped %d guardrails %q", viol, lift, rule.SkippedSteps, rule.Guardrails)
+	}
+}
+
+func TestRegexRule_WrongMagnitudeClampedToMax(t *testing.T) {
+	sc := flatTW(t, 4, "Flash sale at 2026-01-03T01:20:00Z, expect 50× traffic.", 100)
+	rule := runNamed(t, sc, baselines.NameRegexRule, nil)
+	peak := int32(0)
+	for _, s := range rule.PerWorkload["svc"].Samples {
+		peak = max(peak, s.Desired)
+	}
+	// 50 x 100 / 8 = 625 replicas asked for, clamped to the policy maximum.
+	if peak != 100 {
+		t.Fatalf("peak desired = %d, want exactly the maxReplicas clamp 100", peak)
+	}
+	if _, _, v := sumMetrics(rule); v != 0 {
+		t.Fatalf("safety violations = %d", v)
+	}
+}
+
+func TestNoLeakage_RuleOverrides(t *testing.T) {
+	// Scenarios identical up to the publish time (49h05m), different after it.
+	var got [2][]harness.RuleOverride
+	for i, mult := range []float64{4, 8} {
+		sc := flatTW(t, mult, trueNote, 1000)
+		runNamed(t, sc, baselines.NameRegexRule, func(c harness.Config) harness.Config {
+			orig := c.RuleOverrides
+			c.RuleOverrides = func(
+				now time.Time, notes []scenario.Note, snaps map[string]engine.Snapshot,
+			) []harness.RuleOverride {
+				out := orig(now, notes, snaps)
+				got[i] = append(got[i], out...)
+				return out
+			}
+			return c
+		})
+	}
+	if len(got[0]) == 0 || !reflect.DeepEqual(got[0], got[1]) {
+		t.Fatalf("rule overrides differ or are empty:\n%+v\n%+v", got[0], got[1])
+	}
+}
+
+func replicaMinutes(r harness.Result) (rm float64) {
+	for _, m := range r.PerWorkload {
+		for _, s := range m.Samples {
+			rm += float64(s.Desired)
+		}
+	}
+	return rm
+}
+
+func TestOracle_FewestReplicaMinutesAmongZeroBreach(t *testing.T) {
+	sc := exampleFlash(t)
+	oracle := replicaMinutes(runConfig(t, sc, baselines.NameOracle))
+	for _, name := range baselines.Names() {
+		res := runConfig(t, sc, name)
+		if b, _, _ := sumMetrics(res); b == 0 && replicaMinutes(res) < oracle {
+			t.Errorf("%s has zero breaches with %v replica-minutes, fewer than the oracle's %v",
+				name, replicaMinutes(res), oracle)
+		}
+	}
+}
+
+func TestAgentScriptedVsBaseline(t *testing.T) {
+	sc := exampleFlash(t)
+	base := runConfig(t, sc, baselines.NameTWBaseline)
+	agent := runConfig(t, sc, baselines.NameTWAgent)
+	bb, _, _ := sumMetrics(base)
+	ab, lift, _ := sumMetrics(agent)
+	t.Logf("baseline breach %v, agent breach %v, lift_rm %v, investigations %d", bb, ab, lift, agent.Investigations)
+	if ab > bb {
+		t.Fatalf("agent breach %v > baseline %v", ab, bb)
+	}
+	// The breach minutes tie on this scenario by construction: investigations are triggered
+	// by anomalies seen 3 steps into the surge (after 09:03), so the scripted override lands
+	// after every breach minute (09:01-09:04) and only adds replicas. The agent acting at
+	// all is asserted instead.
+	if lift <= 0 || agent.Investigations == 0 {
+		t.Errorf("scripted agent did not act: lift %v, investigations %d", lift, agent.Investigations)
 	}
 }

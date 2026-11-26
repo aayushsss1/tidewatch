@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,12 +68,48 @@ const (
 	reconcileMax = 20
 )
 
+// Guardrails is a guardrail profile for the Tidewatch policy.
+type Guardrails string
+
+const (
+	// GuardrailsMatched is the benchmark default: step limits as loose as the HPA's
+	// (max step = the policy's maxReplicas) and short cooldowns, with the HPA's 300s
+	// scale-down stabilization, so the comparison is not decided by the CRD's conservative
+	// defaults.
+	GuardrailsMatched Guardrails = "matched"
+	// GuardrailsDefault keeps the CRD defaults (scale up +5 per 60s, scale down -2 per 300s,
+	// 10m stabilization): "Tidewatch with safety rails".
+	GuardrailsDefault Guardrails = "default"
+)
+
+// matchedCooldown is the cooldown of the matched profile. It must not be 0: the CRD's
+// omitzero would re-default a zero duration to 60s.
+const (
+	matchedCooldown      = 15 * time.Second
+	matchedStabilization = 300 * time.Second
+)
+
+// resolve maps the zero value to the benchmark default.
+func (g Guardrails) resolve() (Guardrails, error) {
+	switch g {
+	case "", GuardrailsMatched:
+		return GuardrailsMatched, nil
+	case GuardrailsDefault:
+		return GuardrailsDefault, nil
+	}
+	return "", fmt.Errorf("harness: unknown guardrails profile %q (want %s or %s)",
+		g, GuardrailsMatched, GuardrailsDefault)
+}
+
 // Config selects what drives the cluster in one run.
 type Config struct {
 	Name     string // "tidewatch-baseline" | "tidewatch-agent" | a baseline's name
 	Agent    bool
 	Provider llm.Provider // nil when !Agent
 	Model    string
+	// Guardrails is the Tidewatch guardrail profile; empty means GuardrailsMatched. It is
+	// ignored in Controller mode.
+	Guardrails Guardrails
 	// RuleOverrides, when set, is the regex-rule hook: a deterministic stand-in for the
 	// agent. After a note is published and before engine.Step, the harness calls it with
 	// the newly published note (once per note) and the engine snapshots from the previous
@@ -111,7 +148,9 @@ type Result struct {
 	Scenario, Config string
 	Repeat           int
 	Model            string
-	PerWorkload      map[string]cluster.Metrics
+	// Guardrails is the profile a Tidewatch run used; empty for Controller baselines.
+	Guardrails  Guardrails
+	PerWorkload map[string]cluster.Metrics
 	// Investigations counts only investigations that reached the provider (not skipped for
 	// budget, breaker, or a missed deadline).
 	Investigations int
@@ -201,6 +240,13 @@ func Run(ctx context.Context, sc *scenario.Scenario, cfg Config, repeat int, opt
 		name = opts.Controller.Name()
 	}
 	res := Result{Scenario: sc.Name, Config: name, Repeat: repeat, Model: cfg.Model}
+	if opts.Controller == nil {
+		g, err := cfg.Guardrails.resolve()
+		if err != nil {
+			return res, err
+		}
+		cfg.Guardrails, res.Guardrails = g, g
+	}
 	if cfg.Agent && cfg.Provider == nil {
 		return res, errors.New("harness: Agent config needs a Provider")
 	}
@@ -339,6 +385,12 @@ func (r *run) objects(ctx context.Context, c client.Client) error {
 			Forecasting: v1.ForecastingSpec{History: dur(sc.History), Step: dur(sc.Step)},
 			Guardrails:  v1.GuardrailsSpec{MinReplicas: &minR, MaxReplicas: maxR},
 		},
+	}
+	if r.cfg.Guardrails == GuardrailsMatched {
+		pol.Spec.Guardrails.ScaleUp = v1.ScaleUpPolicy{MaxStep: maxR, Cooldown: dur(matchedCooldown)}
+		pol.Spec.Guardrails.ScaleDown = v1.ScaleDownPolicy{
+			MaxStep: maxR, Cooldown: dur(matchedCooldown), StabilizationWindow: dur(matchedStabilization),
+		}
 	}
 	if r.cfg.Agent {
 		pol.Spec.Agent = v1.AgentSpec{Enabled: true, Approval: "Auto"}
@@ -483,28 +535,37 @@ func (r *run) runTidewatch(ctx context.Context, opts Options, repeat int) error 
 
 	notes := r.sc.Notes()
 	ruleSeq := 0
+	var pendingRules []scenario.Note
 	for t := r.sc.StartTime(); t.Before(r.sc.EndTime()); t = t.Add(r.sc.Step) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// 1. Publish the newest note due; triggers see it at the next engine.Step.
-		due := -1
-		for i, n := range notes {
-			if !n.PublishAt.After(t) {
-				due = i
-			}
+		// 1. Publish every note due, oldest first and separated by a blank line, so the
+		// newest is last; triggers see the text at the next engine.Step.
+		due := 0
+		for due < len(notes) && !notes[due].PublishAt.After(t) {
+			due++
 		}
-		if due >= 0 {
-			note := notes[due]
-			text := note.Text
-			notes = notes[due+1:]
-			if err := r.publishNote(ctx, c, text); err != nil {
+		if due > 0 {
+			texts := make([]string, due)
+			for i, n := range notes[:due] {
+				texts[i] = n.Text
+			}
+			pendingRules = append(pendingRules, notes[:due]...)
+			notes = notes[due:]
+			if err := r.publishNote(ctx, c, strings.Join(texts, "\n\n")); err != nil {
 				return fmt.Errorf("harness: publishing note: %w", err)
 			}
-			if r.cfg.RuleOverrides != nil {
-				if err := r.applyRules(t, note, eng, store, uids, &ruleSeq); err != nil {
-					return err
-				}
+		}
+		// The rule hook needs a snapshot of every workload; before the engine's first step
+		// there is none, so the notes wait for the next step.
+		if len(pendingRules) > 0 && r.cfg.RuleOverrides != nil {
+			done, err := r.applyRules(t, pendingRules, eng, store, uids, &ruleSeq)
+			if err != nil {
+				return err
+			}
+			if done {
+				pendingRules = nil
 			}
 		}
 		// 2. The engine evaluates the slot ending at t.
@@ -587,23 +648,27 @@ func (r *run) accountLift(evaluated map[string]v1.TideWorkload) {
 	}
 }
 
-// applyRules calls the regex-rule hook for a newly published note and adds its overrides to
+// applyRules calls the regex-rule hook for newly published notes and adds its overrides to
 // the store. Snapshots are the engine's evaluation of the previous step, so Actual is the
-// load at publish time.
+// load at publish time. It reports false, without calling the hook, when some workload
+// has no snapshot yet.
 func (r *run) applyRules(
-	now time.Time, note scenario.Note, eng *engine.Engine, store *overrides.Store,
+	now time.Time, notes []scenario.Note, eng *engine.Engine, store *overrides.Store,
 	uids map[string]types.UID, seq *int,
-) error {
+) (bool, error) {
 	snaps := map[string]engine.Snapshot{}
 	for w, uid := range uids {
 		if sn, ok := eng.Snapshot(uid); ok {
 			snaps[w] = sn
 		}
 	}
-	for _, ro := range r.cfg.RuleOverrides(now, []scenario.Note{note}, snaps) {
+	if len(snaps) < len(uids) {
+		return false, nil
+	}
+	for _, ro := range r.cfg.RuleOverrides(now, notes, snaps) {
 		uid, ok := uids[ro.Workload]
 		if !ok {
-			return fmt.Errorf("harness: rule override for unknown workload %q", ro.Workload)
+			return false, fmt.Errorf("harness: rule override for unknown workload %q", ro.Workload)
 		}
 		*seq++
 		id := fmt.Sprintf("rule-%d", *seq)
@@ -613,8 +678,8 @@ func (r *run) applyRules(
 			Reason: ro.Reason, ApprovedBy: "rule",
 		})
 		if err != nil {
-			return fmt.Errorf("harness: adding rule override: %w", err)
+			return false, fmt.Errorf("harness: adding rule override: %w", err)
 		}
 	}
-	return nil
+	return true, nil
 }

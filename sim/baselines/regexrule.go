@@ -22,14 +22,21 @@ const ruleHold = 30 * time.Minute
 // minReplicas = ceil(N x currentLoad / (capacity x headroom)), where currentLoad is the
 // engine snapshot's actual load at publish time, over the window
 // [E - timeToReady - 2 x step, E + 30m], clamped to the store's 2h maximum. The engine
-// enforces the usual guardrails. An unparseable note does nothing, and an event already
-// over is ignored.
+// enforces the usual guardrails. An unparseable note does nothing, and so does a note whose
+// event time is not in the future.
+//
+// Lead-time asymmetry (deliberate): this rule lifts from E - timeToReady - 2 x step, so
+// pods are ready when the event starts, while KEDA Cron's window opens at a fixed E - 15m.
+// The rule knows the measured startup time; the human configuring cron does not.
 func RegexRuleOverrides(step time.Duration) RuleFunc {
 	return func(now time.Time, notes []scenario.Note, snaps map[string]engine.Snapshot) []harness.RuleOverride {
 		var out []harness.RuleOverride
 		for _, n := range notes {
 			ev, ok := ParseNote(n.Text, n.PublishAt)
 			if !ok {
+				continue
+			}
+			if !ev.EventTime.After(now) {
 				continue
 			}
 			for w, sn := range snaps {

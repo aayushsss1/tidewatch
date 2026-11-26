@@ -34,7 +34,7 @@ func ceilEps(x float64) int32 { return int32(math.Ceil(x - eps)) } //nolint:gose
 
 // withinTolerance reports whether a usage ratio is close enough to 1 that the HPA does
 // not act.
-func withinTolerance(ratio float64) bool { return math.Abs(ratio-1) <= hpaTolerance }
+func withinTolerance(ratio float64) bool { return math.Abs(ratio-1) <= hpaTolerance+eps }
 
 type recommendation struct {
 	t time.Time
@@ -54,7 +54,7 @@ func (h *hpaState) sync(now time.Time, current, desired, lo, hi int32) int32 {
 	downRec := desired
 	kept := h.recs[:0]
 	for _, r := range h.recs {
-		if now.Sub(r.t) <= hpaStabilize {
+		if now.Sub(r.t) < hpaStabilize {
 			kept = append(kept, r)
 			downRec = max(downRec, r.n)
 		}
