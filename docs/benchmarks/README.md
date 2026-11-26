@@ -190,6 +190,85 @@ run and 1.2M all-output tokens about USD 0.60 per run, so the worst case for 190
 USD 23 to USD 114. The real spend limit is `--max-usd`: the runner stops before a run once the
 estimated spend would exceed it. The `usd` column is an estimate from list prices, not a bill.
 
+## Real-cluster validation (kind)
+
+The simulator re-implements HPA and KEDA. This check runs the real ones, with the real operator, on a
+kind cluster, to see whether the simulator's ordering of configs holds. It is a sanity check on the
+ordering, not a second headline benchmark: it covers one scenario, and its numbers are not comparable
+in magnitude with the simulator's 38-scenario sums.
+
+### Running it
+
+Needs docker, kind, helm, kubectl, jq and python3. From the repository root:
+
+```
+make bench-kind CONFIGS=hpa,keda,tidewatch-baseline
+```
+
+Add `tidewatch-agent` to `CONFIGS` for the agent run. It needs `ANTHROPIC_API_KEY` (paid LLM calls;
+set it as in the full-run step above) and is skipped with a message when the key is unset. The key
+is passed to the operator through a Secret created over stdin and is never printed. Set
+`TIDEWATCH_LLM_MODEL` to change the model.
+
+The script (`hack/bench-kind.sh`) creates a cluster named `tidewatch-bench` (separate from the
+demo's), installs metrics-server, kube-prometheus-stack and the operator, and runs the configs one
+after another. Chart versions are pinned in the script. `make bench-kind-down` deletes the cluster.
+Each config takes about an hour (set `SURGE_AFTER_MIN`, `NOTE_LEAD_MIN`, `HOLD_MIN` and `TAIL_MIN`
+for a shorter timeline). Results go to `bin/bench-kind/results.csv`, plus per-config replica logs and
+operator logs in the same directory.
+
+### The run
+
+Before every config the shop namespace is deleted and recreated at 3 replicas per workload, every
+HPA, ScaledObject and TidePolicy is removed, KEDA is uninstalled unless the config is `keda`, and the
+Prometheus TSDB is wiped and re-seeded with one hour of the baseline pattern. Tidewatch and KEDA or
+the HPA never manage the same workload at once.
+
+Traffic is a gentle 20-minute cycle of 60 to 80 rps on the frontend. At 25 minutes a 4x surge ramps
+over 2 minutes and holds for 15, followed by an 8 minute tail. The `api` and `worker` Deployments
+receive the surge through the frontend's downstream calls (api at once, worker 90s later). Each pod
+serves 50 rps and takes about 45s to become ready. A note, "Flash sale at HH:MM UTC, expect ~4x
+traffic on frontend", is published 20 minutes before the surge.
+
+| config | what runs |
+|---|---|
+| `hpa` | `autoscaling/v2` on CPU at 80%, default behavior, 1 to 10 replicas |
+| `keda` | KEDA (Helm chart 2.21.1) with a Prometheus trigger on `bench:load_rps` (threshold 40 = capacity x 0.8) per workload. When the note is published a cron trigger is added: window from event minus 15 minutes to event plus 60 minutes, `desiredReplicas = ceil(4 x pre-event hourly peak / 40)`. This is the "human" config |
+| `tidewatch-baseline` | The demo policy, agent disabled, matched guardrails (max step equal to max replicas, 15s cooldowns, 300s stabilization) |
+| `tidewatch-agent` | The same with the agent in `Auto` mode |
+
+### What it measures
+
+Metrics are read from Prometheus at the end of each config (`cmd/tidewatch-bench kind-collect`), from
+two recording rules in `demo/bench/rules.yaml` (`bench:load_rps`, `bench:ready_replicas`), sampled
+once a minute:
+
+- `breach_min`: minutes where load exceeds ready replicas x 50 rps;
+- `overprov_rm` and `underprov_rm`: replica-minutes above and below `ceil(load / (50 x 0.8))`;
+- `scale_events`: changes of the Deployment's `spec.replicas` over the window;
+- `p95_ms`, `p99_ms`: from the app's `http_request_duration_seconds` histogram;
+- for the agent: tokens, investigations and an estimated `usd` from the operator's metrics.
+
+`results.csv` uses the simulator's schema plus `env` (`kind`), `p95_ms` and `p99_ms`. `guardrails` is
+`matched` for Tidewatch configs and `n/a` otherwise. Columns the cluster run cannot measure
+(`lift_rm`, `safety_violations`, `llm_calls`) are empty, not 0. `skipped_steps` counts minutes where
+the load or ready series had no sample. The metric math is unit tested against a fake Prometheus.
+
+### Limitations
+
+- One node, shared with whatever else the machine runs. Pods start fast and uniformly, with none of
+  the node scale-up, image pulls or cross-node effects of a real cluster.
+- The HPA scales on a CPU proxy: each admitted request burns 2 ms of CPU in a calibrated busy loop
+  (`BURN_CPU_PER_REQUEST`, set only by `demo/bench`), so that 80% of a 100m request is reached at
+  40 rps per pod, the same point as the other configs' target. Every config runs the same pods, so
+  the burn is not an HPA-only cost, but real services' CPU is not this proportional to requests.
+- One scenario, one run per config, no repeats. Differences of a few minutes are noise.
+- The latency histogram measures only the app's own time (rate-limiter wait plus the burn), not
+  network or queueing in front of it, and a pod's 503s at capacity are fast.
+- History is one hour with a 20-minute season, not 72 hours of daily seasonality, so the forecaster
+  is warmer on the cycle and colder on a daily pattern than in the simulator.
+- Capacity is 50 rps for all three workloads; the simulator's cascades use per-workload capacities.
+
 ## Data licensing
 
 Workload traces come from the Azure Functions 2019 dataset, released under CC-BY-4.0 by

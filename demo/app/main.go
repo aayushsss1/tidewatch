@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,6 +21,10 @@ type config struct {
 	DownstreamURL   string
 	DownstreamDelay time.Duration
 	MaxWait         time.Duration
+	// BurnPerRequest is the CPU time each admitted request burns in a calibrated busy loop. Zero
+	// disables it. Only the real-cluster benchmark sets it, so an HPA on CPU has a signal that is
+	// proportional to requests served.
+	BurnPerRequest time.Duration
 }
 
 type app struct {
@@ -31,6 +36,7 @@ type app struct {
 	requests *prometheus.CounterVec
 	duration prometheus.Histogram
 	client   *http.Client
+	burnIter int64 // busy-loop iterations per request; 0 when the burn is off
 }
 
 func newApp(cfg config, clock func() time.Time) *app {
@@ -50,6 +56,9 @@ func newApp(cfg config, clock func() time.Time) *app {
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
 	a.reg.MustRegister(a.requests, a.duration)
+	if cfg.BurnPerRequest > 0 {
+		a.burnIter = int64(float64(calibrate()) * float64(cfg.BurnPerRequest) / float64(time.Millisecond))
+	}
 	return a
 }
 
@@ -76,12 +85,39 @@ func (a *app) work(w http.ResponseWriter, r *http.Request) {
 	if err := a.limiter.Wait(ctx); err != nil {
 		code = http.StatusServiceUnavailable
 	}
+	if code == http.StatusOK && a.burnIter > 0 {
+		burn(a.burnIter)
+	}
 	w.WriteHeader(code)
 	a.requests.WithLabelValues(strconv.Itoa(code)).Inc()
 	a.duration.Observe(time.Since(start).Seconds())
 	if code == http.StatusOK && a.cfg.DownstreamURL != "" {
 		go a.callDownstream()
 	}
+}
+
+// burnSink keeps the compiler from removing the busy loop.
+var burnSink atomic.Uint64
+
+// burn runs n iterations of a cheap integer recurrence on one core.
+func burn(n int64) {
+	x := uint64(88172645463325252)
+	for i := int64(0); i < n; i++ {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+	}
+	burnSink.Store(x)
+}
+
+// calibrate returns how many burn iterations fit in one millisecond of CPU on this machine.
+func calibrate() int64 {
+	const probe = 20_000_000
+	burn(probe / 10) // warm up
+	start := time.Now()
+	burn(probe)
+	per := float64(probe) / (float64(time.Since(start)) / float64(time.Millisecond))
+	return int64(per)
 }
 
 func (a *app) callDownstream() {
@@ -120,6 +156,7 @@ func main() {
 		DownstreamURL:   os.Getenv("DOWNSTREAM_URL"),
 		DownstreamDelay: envDuration("DOWNSTREAM_DELAY", "0s"),
 		MaxWait:         envDuration("MAX_WAIT", "2s"),
+		BurnPerRequest:  envDuration("BURN_CPU_PER_REQUEST", "0s"),
 	}
 	srv := &http.Server{Addr: ":8080", Handler: newApp(cfg, time.Now).handler(), ReadHeaderTimeout: 5 * time.Second}
 	log.Fatal(srv.ListenAndServe())

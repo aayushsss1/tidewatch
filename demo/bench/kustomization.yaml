@@ -1,0 +1,21 @@
+# The demo shop apps, sized for the real-cluster benchmark: 3 replicas to start, a 100m CPU request,
+# and a CPU burn of 2ms per request. At the pod capacity of 50 rps the burn is 100m, so the HPA's
+# 80% CPU target is reached at 40 rps per pod, the same point as the other configs' 0.8 headroom.
+# Every config runs these same pods, so the burn is not an HPA-only handicap.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../manifests/apps.yaml
+  - ../manifests/servicemonitor.yaml
+patches:
+  - target: { kind: Deployment }
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: BURN_CPU_PER_REQUEST, value: 2ms }

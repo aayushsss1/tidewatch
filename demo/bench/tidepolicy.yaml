@@ -1,0 +1,38 @@
+# Tidewatch config, matched guardrail profile (the simulator's): steps as wide as maxReplicas,
+# 15s cooldowns, 300s scale-down stabilization. hack/bench-kind.sh turns the agent on for
+# tidewatch-agent and publishes the note through spec.agent.context.notes.
+apiVersion: tidewatch.dev/v1alpha1
+kind: TidePolicy
+metadata:
+  name: shop
+  namespace: tidewatch-system
+spec:
+  mode: Active
+  prometheus:
+    url: http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090
+  selector:
+    namespaces: [shop]
+    matchLabels:
+      tidewatch.dev/enabled: "true"
+    kinds:
+      - { apiVersion: apps/v1, kind: Deployment }
+  load:
+    defaultProfile: http
+    profiles:
+      http:
+        query: >-
+          sum(rate(http_requests_total{namespace="{{ .Namespace }}",app="{{ .Name }}"}[1m]))
+        targetPerReplica: "50"
+  forecasting:
+    horizon: 10m
+    history: 1h
+    step: 15s
+    seasonality: 20m
+    accuracyWindow: 1h
+  guardrails:
+    maxReplicas: 10
+    maxTotalReplicas: 25
+    scaleUp: { maxStep: 10, cooldown: 15s }
+    scaleDown: { maxStep: 10, cooldown: 15s, stabilizationWindow: 300s }
+  agent:
+    enabled: false

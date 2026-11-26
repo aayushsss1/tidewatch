@@ -84,3 +84,23 @@ func TestApp_CallsDownstreamAfterDelay(t *testing.T) {
 		t.Fatal("no downstream call")
 	}
 }
+
+func TestApp_BurnCostsCPUOnlyWhenEnabled(t *testing.T) {
+	timeWork := func(burn time.Duration) time.Duration {
+		a := newApp(config{CapacityRPS: 1000, MaxWait: time.Second, BurnPerRequest: burn}, time.Now)
+		h := a.handler()
+		get(h, "/work")
+		start := time.Now()
+		for i := 0; i < 20; i++ {
+			get(h, "/work")
+		}
+		return time.Since(start) / 20
+	}
+	off, on := timeWork(0), timeWork(4*time.Millisecond)
+	if off > time.Millisecond {
+		t.Errorf("burn disabled but a request took %v", off)
+	}
+	if on < 2*time.Millisecond || on > 20*time.Millisecond {
+		t.Errorf("4ms burn took %v per request", on)
+	}
+}
