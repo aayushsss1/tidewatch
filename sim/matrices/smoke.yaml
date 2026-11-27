@@ -1,0 +1,13 @@
+# CI smoke matrix: synthetic traces only (no Azure data), every config, run with
+# --provider scripted. Paths are relative to this file.
+scenarios:
+  - ../scenarios/smoke/flash.yaml
+  - ../scenarios/smoke/control.yaml
+configs:
+  - hpa
+  - keda-prometheus
+  - keda-cron
+  - regex-rule
+  - tidewatch-baseline
+  - tidewatch-agent
+  - oracle

@@ -27,3 +27,7 @@ jobs:
         run: |
           go mod tidy
           make test
+
+      - name: Benchmark smoke run
+        # Synthetic traces and the scripted agent: no Azure data, no API key, no cost.
+        run: make bench-smoke

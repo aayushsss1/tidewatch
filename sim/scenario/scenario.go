@@ -445,7 +445,8 @@ func (s *Scenario) Series(workload string) forecast.Series {
 	return trace.Sample(src, s.Epoch, s.Start-s.History, s.Start+s.Duration, s.Step)
 }
 
-// Notes returns the ops notes, templates rendered against Epoch (see RenderNote), sorted by PublishAt (stable for equal times). The result is a copy.
+// Notes returns the ops notes, sorted by PublishAt (stable for equal times), with templates
+// rendered against Epoch (see RenderNote). The result is a copy.
 func (s *Scenario) Notes() []Note {
 	out := make([]Note, len(s.NoteSpecs))
 	for i, n := range s.NoteSpecs {

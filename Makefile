@@ -63,6 +63,37 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+##@ Benchmark
+
+# The benchmark simulator (sim/, cmd/tidewatch-bench) runs the real operator code against a
+# simulated cluster. See sim/matrices/ for the matrices.
+
+MATRIX ?= sim/matrices/headline.yaml
+OUT ?= bin/bench
+BENCH_FLAGS ?=
+BENCH_SMOKE_OUT ?= bin/bench-smoke
+# Envtest binaries, as in the test target.
+BENCH_ENV = KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)"
+
+.PHONY: build-bench
+build-bench: ## Build the tidewatch-bench binary.
+	go build -o bin/tidewatch-bench ./cmd/tidewatch-bench
+
+.PHONY: bench-smoke
+bench-smoke: build-bench setup-envtest ## Free smoke run: synthetic traces, scripted agent. Fails on any safety violation or skipped step.
+	rm -f "$(BENCH_SMOKE_OUT)/results.csv"
+	$(BENCH_ENV) bin/tidewatch-bench run --matrix sim/matrices/smoke.yaml --out "$(BENCH_SMOKE_OUT)" --provider scripted
+	@awk -F, 'NR==1 { for (i = 1; i <= NF; i++) { if ($$i == "safety_violations") sv = i; if ($$i == "skipped_steps") ss = i } \
+		if (!sv || !ss) { print "bench-smoke: results.csv lacks safety_violations or skipped_steps" > "/dev/stderr"; exit 2 }; next } \
+		$$sv > 0 || $$ss > 0 { print "bench-smoke: unsafe or skipped row: " $$0 > "/dev/stderr"; bad++ } \
+		END { if (NR < 2) { print "bench-smoke: no result rows" > "/dev/stderr"; exit 2 }; \
+		if (bad) exit 1; print "bench-smoke: " NR - 1 " rows, no safety violations, no skipped steps" }' "$(BENCH_SMOKE_OUT)/results.csv"
+
+.PHONY: bench
+bench: build-bench setup-envtest ## Real benchmark run (paid; needs ANTHROPIC_API_KEY): make bench MATRIX=sim/matrices/headline.yaml OUT=bin/bench [BENCH_FLAGS="--max-usd 5 --resume"].
+	@test -n "$$ANTHROPIC_API_KEY" || { echo "ANTHROPIC_API_KEY is required for make bench (use make bench-smoke for a free run)" >&2; exit 1; }
+	$(BENCH_ENV) bin/tidewatch-bench run --matrix "$(MATRIX)" --out "$(OUT)" $(BENCH_FLAGS)
+
 ##@ Plugin
 
 .PHONY: build-plugin

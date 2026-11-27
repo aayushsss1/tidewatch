@@ -13,6 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/go-logr/logr"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 const usage = `usage:
@@ -23,6 +26,8 @@ const usage = `usage:
 `
 
 func main() {
+	// The envtest-backed harness would otherwise print controller-runtime's "SetLogger never called" trace.
+	ctrl.SetLogger(logr.Discard())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := dispatch(ctx, os.Args[1:], os.Stdout, os.Stderr)
 	stop()

@@ -321,6 +321,9 @@ func TestLoadExampleScenarios(t *testing.T) {
 		t.Fatal("no example scenarios")
 	}
 	for _, f := range files {
+		if filepath.Base(f) == "azure-workloads.yaml" {
+			continue // the generated workload selection, not a scenario
+		}
 		s, err := Load(f)
 		if err != nil {
 			t.Errorf("%s: %v", f, err)

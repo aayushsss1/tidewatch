@@ -1,0 +1,44 @@
+# Cascade: 4x surge on the frontend reaches api 90s later and worker 180s later; true note 30m ahead.
+# Azure Functions 2019 function #2 (HashFunction below), rescaled so its p99 per-minute rate is
+# 90 rps; per-pod capacity 25 rps gives about 5 pods at that p99 (headroom 0.8).
+# Offsets are from the trace origin (epoch 00:00 UTC): 72h of history (the window starts at 1h so chain lags stay inside the 14-day trace), then 6h measured (73h..79h); the
+# event starts at 76h (04:00 UTC), 3h into the measured window.
+name: w2-cascade-4x
+seed: 2
+trace:
+  type: azure2019
+  function: dd833bb70b3a57caaa6b4e4560975d9ba5a77fd0151e13d1b5f30b4f6c381d5c
+  peakRPS: 90
+start: 73h
+duration: 6h
+step: 1m
+history: 72h
+workloads:
+  - name: frontend
+    capacity: 25
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+  - name: api
+    capacity: 25
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+    lag: 90s
+    scale: 0.8
+  - name: worker
+    capacity: 20
+    startupDelay: 45s
+    minReplicas: 1
+    maxReplicas: 40
+    lag: 180s
+    scale: 0.6
+events:
+  - kind: surge
+    start: 76h
+    ramp: 5m
+    hold: 30m
+    mult: 4
+notes:
+  - publishAt: 75h30m
+    text: 'Flash sale at {{at "76h"}}, expect ~4× traffic on frontend.'

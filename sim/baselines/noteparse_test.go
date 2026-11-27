@@ -37,7 +37,7 @@ func TestParseNote(t *testing.T) {
 		{"empty", "", false, 0, time.Time{}},
 		{"zero", "expect ~0x at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
 		{"word boundary 4xl", "expect 4xl at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
-		{"zero then valid: the product parser takes the first match only", "0x then expect ~2x at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
+		{"zero first: product parser reads one match", "0x then expect ~2x at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
 		{"hex is not a multiplier", "id 0x10 at 2026-01-01T09:00:00Z", false, 0, time.Time{}},
 	}
 	for _, tc := range tests {

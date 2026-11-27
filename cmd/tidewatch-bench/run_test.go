@@ -10,9 +10,16 @@ import (
 	"testing"
 
 	"github.com/aayushsss1/tidewatch/pkg/llm"
+	"github.com/aayushsss1/tidewatch/sim/baselines"
 	"github.com/aayushsss1/tidewatch/sim/cluster"
 	"github.com/aayushsss1/tidewatch/sim/harness"
 	"github.com/aayushsss1/tidewatch/sim/scenario"
+)
+
+const (
+	cfgHPA, cfgAgent = baselines.NameHPA, baselines.NameTWAgent
+	profMatched      = string(harness.GuardrailsMatched)
+	idFlash          = "grp/a-flash"
 )
 
 const testScenario = `
@@ -55,7 +62,7 @@ func fakeRC(t *testing.T, matrix string, calls *[]plannedRun) runConfig {
 	t.Helper()
 	return runConfig{
 		Matrix: matrix, Out: filepath.Join(t.TempDir(), "out"), Provider: providerScripted, Model: defaultModel,
-		Guardrails: "matched",
+		Guardrails: profMatched,
 		load:       func(string) (*scenario.Scenario, error) { return scenario.Parse([]byte(testScenario), t.TempDir()) },
 		exec: func(_ context.Context, _ *scenario.Scenario, p plannedRun, _ int64) (harness.Result, error) {
 			*calls = append(*calls, p)
@@ -90,7 +97,7 @@ func TestPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runs, err := plan(m, planOptions{MatrixFile: mf, Guardrails: "matched"})
+	runs, err := plan(m, planOptions{MatrixFile: mf, Guardrails: profMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +105,7 @@ func TestPlan(t *testing.T) {
 	if len(runs) != 14 {
 		t.Fatalf("%d runs, want 14", len(runs))
 	}
-	if runs[0].ScenarioID != "grp/a-flash" || runs[0].Guardrails != noGuardrails {
+	if runs[0].ScenarioID != idFlash || runs[0].Guardrails != noGuardrails {
 		t.Errorf("first run = %+v", runs[0])
 	}
 	both, _ := plan(m, planOptions{MatrixFile: mf, Guardrails: "both"})
@@ -106,11 +113,11 @@ func TestPlan(t *testing.T) {
 	if want := 2 * (1 + 2*1 + 2*5); len(both) != want {
 		t.Errorf("both: %d runs, want %d", len(both), want)
 	}
-	only, _ := plan(m, planOptions{MatrixFile: mf, Only: "grp/a-*", Configs: []string{"hpa"}})
-	if len(only) != 1 || only[0].ScenarioID != "grp/a-flash" || only[0].Config != "hpa" {
+	only, _ := plan(m, planOptions{MatrixFile: mf, Only: "grp/a-*", Configs: []string{cfgHPA}})
+	if len(only) != 1 || only[0].ScenarioID != idFlash || only[0].Config != "hpa" {
 		t.Errorf("only = %+v", only)
 	}
-	rep, _ := plan(m, planOptions{MatrixFile: mf, Repeats: 2, Configs: []string{"tidewatch-agent"}})
+	rep, _ := plan(m, planOptions{MatrixFile: mf, Repeats: 2, Configs: []string{cfgAgent}})
 	if len(rep) != 4 {
 		t.Errorf("--repeats 2: %d runs, want 4", len(rep))
 	}
@@ -123,7 +130,7 @@ func TestRunWritesRowsAndResumes(t *testing.T) {
 	mf := fixture(t, "")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Configs = []string{"hpa", "tidewatch-agent"}
+	rc.Configs = []string{cfgHPA, cfgAgent}
 	var out bytes.Buffer
 	if err := execute(context.Background(), rc, &out); err != nil {
 		t.Fatal(err)
@@ -145,7 +152,7 @@ func TestRunWritesRowsAndResumes(t *testing.T) {
 	// Row 1: hpa, lead workload; row 3 or so: agent. Check the agent's lead row.
 	var lead, second []string
 	for _, r := range rows[1:] {
-		if r[col["config"]] == "tidewatch-agent" && r[col["scenario"]] == "grp/a-flash" {
+		if r[col["config"]] == cfgAgent && r[col["scenario"]] == idFlash {
 			if r[col["workload"]] == "frontend" {
 				lead = r
 			} else {
@@ -189,8 +196,8 @@ func TestRunMaxUSD(t *testing.T) {
 	mf := fixture(t, "repeats: {tidewatch-agent: 5}\n")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.Model, rc.key = providerAnthropic, "claude-haiku-5-5", "sk-test"
-	rc.Configs, rc.MaxUSD = []string{"tidewatch-agent"}, 0.25
+	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, "sk-test"
+	rc.Configs, rc.MaxUSD = []string{cfgAgent}, 0.25
 	var out bytes.Buffer
 	if err := execute(context.Background(), rc, &out); err != nil {
 		t.Fatal(err)
@@ -199,7 +206,7 @@ func TestRunMaxUSD(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("%d runs, want 2 before the cap", len(calls))
 	}
-	if !strings.Contains(out.String(), "stopped: estimated spend") || !strings.Contains(out.String(), "before run 3 of 10") {
+	if o := out.String(); !strings.Contains(o, "stopped: estimated spend") || !strings.Contains(o, "before run 3 of 10") {
 		t.Errorf("output:\n%s", out.String())
 	}
 	rows := readCSV(t, rc.Out)
@@ -242,7 +249,7 @@ func TestAgentNeedsKey(t *testing.T) {
 		t.Error("must fail before running anything")
 	}
 	// Non-agent configs need no key.
-	rc.Configs = []string{"hpa", "regex-rule"}
+	rc.Configs = []string{cfgHPA, "regex-rule"}
 	if err := execute(context.Background(), rc, &bytes.Buffer{}); err != nil {
 		t.Fatalf("non-agent run: %v", err)
 	}
@@ -296,5 +303,54 @@ func TestScriptedProvider(t *testing.T) {
 	resp, _ = scriptedProvider{}.Turn(context.Background(), llm.TurnRequest{Messages: []llm.Message{{Text: "nothing"}}})
 	if resp.Message.ToolCall.Name != "no_action" {
 		t.Errorf("call = %s", resp.Message.ToolCall.Name)
+	}
+}
+
+// TestCommittedMatrices checks the shipped matrices plan the expected runs and that the
+// synthetic (CI) scenarios load. The headline scenarios need the Azure cache, so they are
+// only planned here, not loaded.
+func TestCommittedMatrices(t *testing.T) {
+	smoke := filepath.Join("..", "..", "sim", "matrices", "smoke.yaml")
+	m, err := loadMatrix(smoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := plan(m, planOptions{MatrixFile: smoke, Guardrails: profMatched})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 14 {
+		t.Errorf("smoke: %d runs, want 2 scenarios x 7 configs", len(runs))
+	}
+	for _, p := range runs[:1] {
+		if _, err := scenario.Load(p.Path); err != nil {
+			t.Errorf("%s: %v", p.ScenarioID, err)
+		}
+	}
+	for _, p := range runs {
+		if p.Config == cfgAgent && p.Repeat != 0 {
+			t.Errorf("smoke runs the agent once, got repeat %d", p.Repeat)
+		}
+	}
+
+	head := filepath.Join("..", "..", "sim", "matrices", "headline.yaml")
+	hm, err := loadMatrix(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr, err := plan(hm, planOptions{MatrixFile: head, Guardrails: profMatched})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, agent := map[string]bool{}, 0
+	for _, p := range hr {
+		scenarios[p.ScenarioID] = true
+		if p.Config == cfgAgent {
+			agent++
+		}
+	}
+	// 6 workloads x 4 scenario kinds + 2 B scenarios; 7 configs, the agent x5.
+	if len(scenarios) != 26 || agent != 26*5 || len(hr) != 26*(6+5) {
+		t.Errorf("headline: %d scenarios, %d agent runs, %d runs", len(scenarios), agent, len(hr))
 	}
 }

@@ -174,7 +174,8 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 			return fmt.Errorf("interrupted after %d of %d runs (%d skipped as done): %w", started, total, i-started, err)
 		}
 		if rc.MaxUSD > 0 && spent > rc.MaxUSD {
-			_, _ = fmt.Fprintf(stdout, "stopped: estimated spend $%.4f exceeds --max-usd %.2f; stopped before run %d of %d (%d completed this session). Continue with --resume.\n",
+			_, _ = fmt.Fprintf(stdout, "stopped: estimated spend $%.4f exceeds --max-usd %.2f; "+
+				"stopped before run %d of %d (%d completed this session). Continue with --resume.\n",
 				spent, rc.MaxUSD, i+1, total, started)
 			return nil
 		}
@@ -194,7 +195,8 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 			if ctx.Err() != nil {
 				return fmt.Errorf("interrupted during %s/%s: %w", p.ScenarioID, p.Config, ctx.Err())
 			}
-			_, _ = fmt.Fprintf(stdout, "[%d/%d] %s %s %s r%d FAILED: %v\n", i+1, total, p.ScenarioID, p.Config, p.Guardrails, p.Repeat, err)
+			_, _ = fmt.Fprintf(stdout, "[%d/%d] %s %s %s r%d FAILED: %v\n",
+				i+1, total, p.ScenarioID, p.Config, p.Guardrails, p.Repeat, err)
 			failed = append(failed, p.key())
 			continue
 		}
@@ -211,11 +213,13 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 			return err
 		}
 		sum := summarize(res)
-		_, _ = fmt.Fprintf(stdout, "[%d/%d] %s %s %s r%d breach_min=%.0f overprov_rm=%.0f violations=%d skipped=%d inv=%d usd=$%.4f %.1fs\n",
+		_, _ = fmt.Fprintf(stdout, "[%d/%d] %s %s %s r%d breach_min=%.0f overprov_rm=%.0f "+
+			"violations=%d skipped=%d inv=%d usd=$%.4f %.1fs\n",
 			i+1, total, p.ScenarioID, p.Config, p.Guardrails, p.Repeat,
 			sum.breach, sum.overprov, sum.violations, res.SkippedSteps, res.Investigations, cost, wall)
 	}
-	_, _ = fmt.Fprintf(stdout, "done: %d runs this session, estimated spend $%.4f, results in %s\n", started, spent, csvPath)
+	_, _ = fmt.Fprintf(stdout, "done: %d runs this session, estimated spend $%.4f, results in %s\n",
+		started, spent, csvPath)
 	if len(failed) > 0 {
 		return fmt.Errorf("%d runs failed (rerun with --resume): %s", len(failed), strings.Join(failed, ", "))
 	}
@@ -241,7 +245,7 @@ func summarize(res harness.Result) runSummary {
 func rowsFor(sc *scenario.Scenario, p plannedRun, seed int64, model string, res harness.Result,
 	cost, wall float64) [][]string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
-	var rows [][]string
+	rows := make([][]string, 0, len(sc.Workloads))
 	for i, w := range sc.Workloads {
 		m := res.PerWorkload[w.Name]
 		row := []string{
