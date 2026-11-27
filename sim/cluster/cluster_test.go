@@ -22,7 +22,9 @@ func target(name string) workload.Target {
 func newC(seed int64, jitter float64) (*SimCluster, *clocktesting.FakeClock) {
 	clk := clocktesting.NewFakeClock(t0)
 	c := New(seed, clk)
-	c.AddWorkload("ns", "a", WorkloadSpec{CapacityRPS: 10, StartupDelay: Delay{Mean: time.Minute, Jitter: jitter}, Initial: 2})
+	c.AddWorkload("ns", "a", WorkloadSpec{
+		CapacityRPS: 10, StartupDelay: Delay{Mean: time.Minute, Jitter: jitter}, Initial: 2,
+	})
 	return c, clk
 }
 
@@ -111,11 +113,11 @@ func TestNeededFloor(t *testing.T) {
 }
 
 func TestAccountOverride(t *testing.T) {
-	c, clk := newC(1, 0)
+	c, _ := newC(1, 0)
 	k := Key{"ns", "a"}
-	c.AccountOverride(clk.Now(), 2*time.Minute, k, 3, 8, 5) // waste (8-5)*2 = 6
-	c.AccountOverride(clk.Now(), time.Minute, k, 3, 4, 6)   // 0
-	c.AccountOverride(clk.Now(), time.Minute, k, 3, 2, 1)   // violation
+	c.AccountOverride(2*time.Minute, k, 3, 8, 5) // waste (8-5)*2 = 6
+	c.AccountOverride(time.Minute, k, 3, 4, 6)   // 0
+	c.AccountOverride(time.Minute, k, 3, 2, 1)   // violation
 	m, _ := c.Metrics("ns", "a")
 	if m.OverrideWasteRM != 6 || m.SafetyViolation != 1 {
 		t.Fatalf("got %+v", m)
@@ -125,7 +127,7 @@ func TestAccountOverride(t *testing.T) {
 func run(seed int64) []time.Time {
 	c, clk := newC(seed, 0)
 	_ = c.SetReplicas("ns", "a", 12)
-	var out []time.Time
+	out := make([]time.Time, 0, 120)
 	for range 120 {
 		st, _ := c.State("ns", "a")
 		_ = st
@@ -159,15 +161,40 @@ func TestConcurrent(t *testing.T) {
 	c, clk := newC(1, 0)
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := range 200 {
 				_ = c.Set(context.Background(), target("a"), int32(1+(i+j)%10))
 				_, _ = c.Get(context.Background(), target("a"))
 				c.Account(clk.Now(), time.Minute, map[Key]float64{{"ns", "a"}: 10})
 			}
-		}()
+		})
 	}
 	wg.Wait()
+}
+
+func TestScaleEventsCountEveryChange(t *testing.T) {
+	c, clk := newC(1, -1)
+	_ = c.SetReplicas("ns", "a", 4)
+	_ = c.SetReplicas("ns", "a", 3)
+	_ = c.SetReplicas("ns", "a", 3) // no change
+	c.Account(clk.Now(), time.Minute, map[Key]float64{{"ns", "a"}: 1})
+	if m, _ := c.Metrics("ns", "a"); m.ScaleEvents != 2 {
+		t.Fatalf("got %d", m.ScaleEvents)
+	}
+}
+
+func TestScaleDownRemovesNewestBySequence(t *testing.T) {
+	c, clk := newC(1, 0) // jitter: ready times are not ordered by creation
+	_ = c.SetReplicas("ns", "a", 8)
+	clk.Step(time.Hour) // all ready
+	_ = c.SetReplicas("ns", "a", 10)
+	clk.Step(time.Hour)
+	_ = c.SetReplicas("ns", "a", 2)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range c.wls[Key{"ns", "a"}].pods {
+		if p.seq > 1 {
+			t.Fatalf("kept newer pod seq %d", p.seq)
+		}
+	}
 }
