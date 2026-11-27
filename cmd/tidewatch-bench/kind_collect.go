@@ -330,7 +330,7 @@ func collectKind(ctx context.Context, pc *promClient, kc kindConfig) ([][]string
 				row[5] = kc.Model
 				row[14] = strconv.Itoa(int(invest))
 				row[16], row[17] = strconv.Itoa(int(tokIn)), strconv.Itoa(int(tokOut))
-				if cost, ok := usd(kc.Model, int(tokIn), int(tokOut)); ok {
+				if cost, ok := usd(kc.Model, int(tokIn), int(tokOut), 0, 0); ok { // totals only: short-prompt rate
 					row[18] = strconv.FormatFloat(cost, 'f', 6, 64)
 				}
 			}

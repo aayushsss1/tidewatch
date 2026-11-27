@@ -157,7 +157,11 @@ type Result struct {
 	LLMCalls       int
 	InputTokens    int
 	OutputTokens   int
-	TranscriptPath string
+	// LongInputTokens and LongOutputTokens are the part of the totals above that belong to
+	// calls whose prompt exceeded LongPromptTokens, which some models price higher.
+	LongInputTokens  int
+	LongOutputTokens int
+	TranscriptPath   string
 	// SkippedSteps counts workload-steps the engine did not evaluate (see checkEvaluated),
 	// with SkippedReasons breaking them down. Tidewatch configs only; expected to be 0.
 	SkippedSteps   int
@@ -169,10 +173,14 @@ var (
 	runCounter atomic.Int64
 )
 
+// LongPromptTokens is the prompt size above which a call is tallied as a long call in
+// Result.LongInputTokens and Result.LongOutputTokens.
+const LongPromptTokens = 100_000
+
 // countingProvider counts model calls and tokens for one run.
 type countingProvider struct {
 	llm.Provider
-	calls, in, out atomic.Int64
+	calls, in, out, longIn, longOut atomic.Int64
 }
 
 func (c *countingProvider) Turn(ctx context.Context, req llm.TurnRequest) (llm.TurnResponse, error) {
@@ -180,6 +188,10 @@ func (c *countingProvider) Turn(ctx context.Context, req llm.TurnRequest) (llm.T
 	resp, err := c.Provider.Turn(ctx, req)
 	c.in.Add(int64(resp.InputTokens))
 	c.out.Add(int64(resp.OutputTokens))
+	if resp.InputTokens > LongPromptTokens {
+		c.longIn.Add(int64(resp.InputTokens))
+		c.longOut.Add(int64(resp.OutputTokens))
+	}
 	return resp, err
 }
 
@@ -526,7 +538,8 @@ func (r *run) runTidewatch(ctx context.Context, opts Options, repeat int) error 
 			if err := os.MkdirAll(opts.TranscriptDir, 0o750); err != nil {
 				return err
 			}
-			path := filepath.Join(opts.TranscriptDir, fmt.Sprintf("%s-%s-%d.jsonl", r.sc.Name, r.res.Config, repeat))
+			path := filepath.Join(opts.TranscriptDir,
+				fmt.Sprintf("%s-%s-%s-%d.jsonl", r.sc.Name, r.res.Config, r.res.Guardrails, repeat))
 			f, err := os.Create(path) //nolint:gosec // harness output path
 			if err != nil {
 				return err
@@ -539,6 +552,7 @@ func (r *run) runTidewatch(ctx context.Context, opts Options, repeat int) error 
 		defer func() {
 			r.res.LLMCalls = int(counter.calls.Load())
 			r.res.InputTokens, r.res.OutputTokens = int(counter.in.Load()), int(counter.out.Load())
+			r.res.LongInputTokens, r.res.LongOutputTokens = int(counter.longIn.Load()), int(counter.longOut.Load())
 		}()
 	}
 
