@@ -1,0 +1,41 @@
+# Flash-sale cascade traffic: a gentle 20-minute cycle (60 to 80 rps) so the forecaster has a
+# season to learn, then a 4x surge on the frontend (ramp and hold set by the script). api and
+# worker receive it through the frontend's downstream calls, api at once and worker 90s later.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trafficgen
+  namespace: shop
+  labels:
+    app: trafficgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trafficgen
+  template:
+    metadata:
+      labels:
+        app: trafficgen
+    spec:
+      containers:
+        - name: trafficgen
+          image: tidewatch-trafficgen:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - run
+            - --target=http://frontend.shop:8080/work
+            - --base=60
+            - --amp=20
+            - --period=20m
+            - --noise=0.05
+            - --seed=1
+            - --epoch=${EPOCH}
+            - --spike-at=${SPIKE_AT}
+            - --spike-mult=4
+            - --spike-ramp=${RAMP}
+            - --spike-dur=${HOLD}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi

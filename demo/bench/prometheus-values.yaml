@@ -1,0 +1,6 @@
+# Overlay on demo/prometheus-values.yaml for the real-cluster benchmark: the admin API lets
+# hack/bench-kind.sh wipe the TSDB between configs so one config's surge never leaks into the
+# next config's forecasting history.
+prometheus:
+  prometheusSpec:
+    enableAdminAPI: true

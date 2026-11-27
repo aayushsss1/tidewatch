@@ -1,0 +1,27 @@
+# keda config, one workload. The Prometheus trigger scales on the request-rate recording rule with
+# a threshold of capacity x 0.8 per replica. The cron trigger (added by hack/bench-kind.sh when the
+# note is published, with the lines between the CRON markers) is the human who reads the note.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ${APP}
+  namespace: shop
+spec:
+  scaleTargetRef: { name: ${APP} }
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 30
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090
+        query: bench:load_rps{app="${APP}"}
+        threshold: "${THRESHOLD}"
+#CRON-BEGIN
+    - type: cron
+      metadata:
+        timezone: UTC
+        start: "${CRON_START}"
+        end: "${CRON_END}"
+        desiredReplicas: "${CRON_REPLICAS}"
+#CRON-END

@@ -317,7 +317,7 @@ func rowsFor(sc *scenario.Scenario, p plannedRun, seed int64, res harness.Result
 			row[14], row[15] = strconv.Itoa(res.Investigations), strconv.Itoa(res.LLMCalls)
 			row[16], row[17] = strconv.Itoa(res.InputTokens), strconv.Itoa(res.OutputTokens)
 			row[18], row[19] = strconv.FormatFloat(cost, 'f', 6, 64), strconv.FormatFloat(wall, 'f', 2, 64)
-			row[20] = "true"
+			row[20] = trueStr
 		}
 		rows = append(rows, row)
 	}

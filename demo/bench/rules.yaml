@@ -1,0 +1,21 @@
+# The two series the benchmark is scored on, and that the KEDA trigger reads.
+#   bench:load_rps          offered requests/s per app, the expression the Tidewatch load profile uses
+#   bench:ready_replicas    ready replicas per Deployment (kube-state-metrics), keyed by app
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bench
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: bench
+      interval: 15s
+      rules:
+        - record: bench:load_rps
+          expr: sum by (app) (rate(http_requests_total{namespace="shop"}[1m]))
+        - record: bench:ready_replicas
+          expr: >-
+            sum by (app) (label_replace(
+            kube_deployment_status_replicas_ready{namespace="shop"}, "app", "$1", "deployment", "(.*)"))

@@ -129,6 +129,20 @@ demo: ## Act 1: kind cluster, Prometheus, operator, shop apps, seeded history, d
 demo-down: ## Delete the demo kind cluster.
 	$(KIND) delete cluster --name tidewatch
 
+# Real-cluster validation (see docs/benchmarks/README.md): the flash-sale cascade under real HPA,
+# real KEDA and the real operator on a kind cluster named tidewatch-bench. Takes about an hour per
+# config. tidewatch-agent needs ANTHROPIC_API_KEY and makes paid LLM calls; it is skipped without one.
+CONFIGS ?= hpa,keda,tidewatch-baseline
+
+.PHONY: bench-kind
+bench-kind: ## Real-cluster benchmark: make bench-kind CONFIGS=hpa,keda,tidewatch-baseline[,tidewatch-agent]. Results in bin/bench-kind/results.csv.
+	./hack/bench-kind.sh "$(CONFIGS)"
+
+.PHONY: bench-kind-down
+bench-kind-down: ## Delete the bench-kind kind cluster.
+	$(KIND) delete cluster --name tidewatch-bench --kubeconfig bin/bench-kind.kubeconfig
+	rm -f bin/bench-kind.kubeconfig
+
 .PHONY: demo-e2e
 demo-e2e: manifests generate fmt vet ## Run hack/demo.sh and assert the prescale before the peak, Act 1 only (needs docker, kind, helm).
 	# env -u: an exported key must never turn the Act 1 run into a paid agent run.

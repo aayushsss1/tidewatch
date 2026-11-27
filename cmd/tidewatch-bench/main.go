@@ -23,6 +23,8 @@ const usage = `usage:
   tidewatch-bench run --matrix <file> --out <dir> [--provider anthropic|scripted]
         [--model claude-haiku-5-5] [--repeats N] [--only <glob>] [--config a,b]
         [--resume] [--max-usd X] [--guardrails matched|default|both]
+  tidewatch-bench kind-collect --out <results.csv> --config <name> --start <RFC3339> --end <RFC3339>
+        [--prom http://localhost:9090] [--workloads frontend,api,worker] [--agent --model <m>]
   tidewatch-bench select-azure --top N --out <file> [--azure-dir <dir>]
   tidewatch-bench gen-headline [--workloads <azure-workloads.yaml>] [--out <dir>] [--azure-dir <dir>]
 `
@@ -47,6 +49,8 @@ func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	switch args[0] {
 	case "run":
 		return runCmd(ctx, args[1:], stdout)
+	case "kind-collect":
+		return kindCollectCmd(ctx, args[1:], stdout)
 	case "gen-headline":
 		return genHeadlineCmd(args[1:], stdout)
 	case "select-azure":
