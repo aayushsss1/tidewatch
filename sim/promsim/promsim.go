@@ -73,9 +73,40 @@ func AppLabelKey(q string) (string, bool) {
 	return name, name != ""
 }
 
+// loadMetric is the only metric the simulator holds: each workload's request rate.
+const loadMetric = "http_requests_total"
+
+// isLoadQuery reports whether q reads only the request-rate series: every vector selector is
+// loadMetric and the only functions and aggregations are rate, irate, sum and sum by.
+func isLoadQuery(q string) bool {
+	expr, err := parser.NewParser(parser.Options{}).ParseExpr(q)
+	if err != nil {
+		return false
+	}
+	ok, selectors := true, 0
+	parser.Inspect(expr, func(n parser.Node, _ []parser.Node) error {
+		switch v := n.(type) {
+		case *parser.VectorSelector:
+			selectors++
+			ok = ok && v.Name == loadMetric
+		case *parser.Call:
+			ok = ok && (v.Func.Name == "rate" || v.Func.Name == "irate")
+		case *parser.AggregateExpr:
+			ok = ok && v.Op == parser.SUM
+		case nil, *parser.MatrixSelector, *parser.ParenExpr: // nil ends a subtree walk
+		default:
+			ok = false
+		}
+		return nil
+	})
+	return ok && selectors > 0
+}
+
 // RangeSeries implements prom.Querier. Slot semantics: the point at t is the average load
 // over (t-step, t], so serving every t <= now never leaks future data. Only equality
-// app matchers resolve; a regex app=~ matcher yields an all-NaN series.
+// app matchers resolve; a regex app=~ matcher yields an all-NaN series. Only the request-rate
+// series exists: any query that is not a rate or sum of it (a histogram, increase(), another
+// metric) yields an all-NaN series, which the agent sees as no data.
 func (s *Sim) RangeSeries(
 	_ context.Context, q string, start, end time.Time, step time.Duration,
 ) (forecast.Series, error) {
@@ -86,6 +117,9 @@ func (s *Sim) RangeSeries(
 	out := forecast.Series{Step: step, Points: make([]forecast.Point, n)}
 	for i := range out.Points {
 		out.Points[i] = forecast.Point{T: start.Add(time.Duration(i) * step), V: math.NaN()}
+	}
+	if !isLoadQuery(q) {
+		return out, nil
 	}
 	name, ok := s.keyOf(q)
 	if !ok {
