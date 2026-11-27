@@ -3,6 +3,7 @@ package baselines
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,18 +54,18 @@ func TestParseNote(t *testing.T) {
 	}
 }
 
-// TestParseNoteMatchesAgentParser pins the fairness invariant: for every note in every
-// scenario file, the baselines see the same event (time, multiplier) as the agent's parser.
-func TestParseNoteMatchesAgentParser(t *testing.T) {
+// TestScenarioNotesParse pins the fairness invariants for every scenario with notes: the
+// baselines parse the note into the declared multiplier and event time (the surge start, or
+// for the B scenarios the declared adversarial multiplier and the wrong time), and they agree
+// with the agent's parser on both.
+func TestScenarioNotesParse(t *testing.T) {
 	files, err := filepath.Glob("../scenarios/*.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	more, _ := filepath.Glob("../scenarios/*/*.yaml")
 	files = append(files, more...)
-	if len(files) == 0 {
-		t.Fatal("no scenario files found")
-	}
+	checked := 0
 	for _, f := range files {
 		if filepath.Base(f) == "azure-workloads.yaml" {
 			continue
@@ -74,25 +75,51 @@ func TestParseNoteMatchesAgentParser(t *testing.T) {
 			t.Fatal(err)
 		}
 		var sc struct {
+			Name   string `yaml:"name"`
+			Events []struct {
+				Start time.Duration `yaml:"start"`
+				Mult  float64       `yaml:"mult"`
+			} `yaml:"events"`
 			Notes []struct {
-				PublishAt string `yaml:"publishAt"`
-				Text      string `yaml:"text"`
+				PublishAt time.Duration `yaml:"publishAt"`
+				Text      string        `yaml:"text"`
 			} `yaml:"notes"`
 		}
 		if err := yaml.Unmarshal(raw, &sc); err != nil {
 			t.Fatalf("%s: %v", f, err)
 		}
-		epoch := scenario.DefaultEpoch
-		for i, n := range sc.Notes {
-			pub := epoch.Add(24 * time.Hour)
-			if d, err := time.ParseDuration(n.PublishAt); err == nil {
-				pub = epoch.Add(d)
+		if len(sc.Notes) == 0 {
+			if len(sc.Events) != 0 && filepath.Base(filepath.Dir(f)) != "scenarios" && !strings.HasSuffix(sc.Name, "control") {
+				t.Errorf("%s: has an event but no note", f)
 			}
-			text, err := scenario.RenderNote(n.Text, epoch)
+			continue
+		}
+		if len(sc.Events) != 1 {
+			t.Fatalf("%s: want exactly one event to compare the note against, got %d", f, len(sc.Events))
+		}
+		wantMult := sc.Events[0].Mult
+		wantAt := scenario.DefaultEpoch.Add(sc.Events[0].Start)
+		switch sc.Name {
+		case "b-adversarial":
+			wantMult = 50
+		case "b-wrong-time":
+			wantAt = wantAt.Add(2 * time.Hour)
+		}
+		for i, n := range sc.Notes {
+			pub := scenario.DefaultEpoch.Add(n.PublishAt)
+			text, err := scenario.RenderNote(n.Text, scenario.DefaultEpoch)
 			if err != nil {
 				t.Fatalf("%s note %d: %v", f, i, err)
 			}
 			got, ok := ParseNote(text, pub)
+			if !ok {
+				t.Errorf("%s note %d: baseline cannot parse %q", f, i, text)
+				continue
+			}
+			if got.Multiplier != wantMult || !got.EventTime.Equal(wantAt) {
+				t.Errorf("%s note %d: baseline parsed %vx at %v, want %vx at %v",
+					f, i, got.Multiplier, got.EventTime, wantMult, wantAt)
+			}
 			var want *signal.NoteEvent
 			for _, ev := range signal.ParseNoteEvents(text, pub) {
 				if ev.Multiplier > 0 {
@@ -100,13 +127,13 @@ func TestParseNoteMatchesAgentParser(t *testing.T) {
 					break
 				}
 			}
-			if ok != (want != nil) {
-				t.Errorf("%s note %d: baseline ok=%v, signal has event=%v", f, i, ok, want != nil)
-				continue
+			if want == nil || !got.EventTime.Equal(want.At) || got.Multiplier != want.Multiplier {
+				t.Errorf("%s note %d: baseline %+v disagrees with the agent parser %+v", f, i, got, want)
 			}
-			if ok && (!got.EventTime.Equal(want.At) || got.Multiplier != want.Multiplier) {
-				t.Errorf("%s note %d: baseline %+v != signal %+v", f, i, got, want)
-			}
+			checked++
 		}
+	}
+	if checked < 20 {
+		t.Errorf("checked only %d notes, expected the headline, smoke and example scenarios", checked)
 	}
 }

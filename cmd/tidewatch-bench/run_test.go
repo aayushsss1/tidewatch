@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ const (
 	cfgHPA, cfgAgent = baselines.NameHPA, baselines.NameTWAgent
 	profMatched      = string(harness.GuardrailsMatched)
 	idFlash          = "grp/a-flash"
+	leadName         = "frontend"
 )
 
 const testScenario = `
@@ -68,8 +70,8 @@ func fakeRC(t *testing.T, matrix string, calls *[]plannedRun) runConfig {
 			*calls = append(*calls, p)
 			return harness.Result{
 				PerWorkload: map[string]cluster.Metrics{
-					"frontend": {BreachMinutes: 3, OverprovRM: 5, SafetyViolation: 0, ScaleEvents: 2},
-					"api":      {BreachMinutes: 1},
+					leadName: {BreachMinutes: 3, OverprovRM: 5, SafetyViolation: 0, ScaleEvents: 2},
+					"api":    {BreachMinutes: 1},
 				},
 				Investigations: 2, LLMCalls: 5, InputTokens: 1_000_000, OutputTokens: 200_000, SkippedSteps: 0,
 			}, nil
@@ -153,7 +155,7 @@ func TestRunWritesRowsAndResumes(t *testing.T) {
 	var lead, second []string
 	for _, r := range rows[1:] {
 		if r[col["config"]] == cfgAgent && r[col["scenario"]] == idFlash {
-			if r[col["workload"]] == "frontend" {
+			if r[col["workload"]] == leadName {
 				lead = r
 			} else {
 				second = r
@@ -202,15 +204,15 @@ func TestRunMaxUSD(t *testing.T) {
 	if err := execute(context.Background(), rc, &out); err != nil {
 		t.Fatal(err)
 	}
-	// Each run: 1M in x $0.10 + 0.2M out x $0.50 = $0.20; the second run ends at $0.40 > 0.25.
-	if len(calls) != 2 {
-		t.Fatalf("%d runs, want 2 before the cap", len(calls))
+	// Each run: 1M in x $0.10 + 0.2M out x $0.50 = $0.20. After run 1, spent + mean = $0.40 >= 0.25.
+	if len(calls) != 1 {
+		t.Fatalf("%d runs, want 1 before the cap", len(calls))
 	}
-	if o := out.String(); !strings.Contains(o, "stopped: estimated spend") || !strings.Contains(o, "before run 3 of 10") {
+	if o := out.String(); !strings.Contains(o, "stopped: estimated spend") || !strings.Contains(o, "before run 2 of 10") {
 		t.Errorf("output:\n%s", out.String())
 	}
 	rows := readCSV(t, rc.Out)
-	if rows[1][col(rows, "model")] != "claude-haiku-5-5" {
+	if rows[1][col(rows, "model")] != defaultModel {
 		t.Errorf("model column = %q", rows[1][col(rows, "model")])
 	}
 	if got := rows[1][col(rows, "usd")]; got != "0.200000" {
@@ -349,8 +351,80 @@ func TestCommittedMatrices(t *testing.T) {
 			agent++
 		}
 	}
-	// 6 workloads x 4 scenario kinds + 2 B scenarios; 7 configs, the agent x5.
-	if len(scenarios) != 26 || agent != 26*5 || len(hr) != 26*(6+5) {
+	// 6 workloads x (4 scenario kinds + 2 slow-start variants) + 2 B scenarios; 7 configs, the agent x5.
+	if len(scenarios) != 38 || agent != 38*5 || len(hr) != 38*(6+5) {
 		t.Errorf("headline: %d scenarios, %d agent runs, %d runs", len(scenarios), agent, len(hr))
+	}
+}
+
+func TestSeedIsConstantAcrossRepeatsAndLeadColumn(t *testing.T) {
+	mf := fixture(t, "repeats: {tidewatch-agent: 3}\n")
+	var calls []plannedRun
+	rc := fakeRC(t, mf, &calls)
+	rc.Configs = []string{cfgHPA, cfgAgent}
+	if err := execute(context.Background(), rc, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	rows := readCSV(t, rc.Out)
+	leads := 0
+	for _, r := range rows[1:] {
+		if r[col(rows, "seed")] != "10" {
+			t.Errorf("seed = %s, want the scenario seed 10 for every config and repeat: %v", r[4], r)
+		}
+		if r[col(rows, "config")] == cfgHPA && r[col(rows, "guardrails")] != "n/a" {
+			t.Errorf("controller guardrails = %q, want n/a", r[2])
+		}
+		if r[col(rows, "lead")] == "true" {
+			leads++
+			if r[col(rows, "workload")] != leadName {
+				t.Errorf("lead row is %s", r[6])
+			}
+		}
+	}
+	if leads != 2*(1+3) {
+		t.Errorf("%d lead rows, want one per run (8)", leads)
+	}
+}
+
+func TestFailedRunCountsTokensAndIsReported(t *testing.T) {
+	mf := fixture(t, "")
+	var calls []plannedRun
+	rc := fakeRC(t, mf, &calls)
+	rc.Provider, rc.key = providerAnthropic, "sk-test"
+	rc.Configs = []string{cfgAgent}
+	ok := rc.exec
+	rc.exec = func(ctx context.Context, sc *scenario.Scenario, p plannedRun, seed int64) (harness.Result, error) {
+		res, _ := ok(ctx, sc, p, seed)
+		if p.ScenarioID == idFlash {
+			return res, errors.New("boom")
+		}
+		return res, nil
+	}
+	var out bytes.Buffer
+	err := execute(context.Background(), rc, &out)
+	if err == nil || !strings.Contains(err.Error(), "1 runs failed") {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(out.String(), "failed: boom (usd=$0.2000)") {
+		t.Errorf("output:\n%s", out.String())
+	}
+	if rows := readCSV(t, rc.Out); len(rows) != 1+2 {
+		t.Errorf("results rows = %d, want header + the good run's 2 rows", len(rows))
+	}
+	p, err := readPrior(filepath.Join(rc.Out, "results.csv"), filepath.Join(rc.Out, "failed.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.spent < 0.399 || p.spent > 0.401 || p.agentRuns != 2 || len(p.done) != 1 {
+		t.Errorf("prior = %+v, want spend 0.40 (failed run's tokens included), 2 agent runs, 1 done", p)
+	}
+}
+
+func TestResumeKeyIncludesModel(t *testing.T) {
+	a := plannedRun{ScenarioID: "s", Config: cfgAgent, Guardrails: profMatched, Model: "claude-haiku-5-5"}
+	b := a
+	b.Model = "claude-sonnet-5-5"
+	if a.key() == b.key() {
+		t.Fatal("different models must not share a resume key")
 	}
 }

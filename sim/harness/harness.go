@@ -219,7 +219,9 @@ func newLoadFn(sc *scenario.Scenario) loadFn {
 	}
 }
 
-// Run simulates sc under cfg and returns its metrics.
+// Run simulates sc under cfg and returns its metrics. Every run starts warm: each workload's
+// initial replicas are Needed(max load over [t0, t0 + startupDelayMean + step]), clamped to
+// its bounds, the same for all configurations (see the sizing loop below).
 func Run(ctx context.Context, sc *scenario.Scenario, cfg Config, repeat int, opts Options) (Result, error) {
 	runMu.Lock()
 	defer runMu.Unlock()
@@ -268,7 +270,14 @@ func Run(ctx context.Context, sc *scenario.Scenario, cfg Config, repeat int, opt
 		r.ns = fmt.Sprintf("run-%d", runCounter.Add(1))
 	}
 	for _, w := range sc.Workloads {
-		l0 := load(w.Name, sc.StartTime())
+		// Warm start, identical for every config: the system ran before the window opened,
+		// so it starts sized for the peak of the first startupDelay + one step, the window
+		// the oracle looks ahead over. This removes cold-start artifacts (a trace burst in
+		// the first minutes that no config could provision for).
+		l0 := 0.0
+		for t := sc.StartTime(); !t.After(sc.StartTime().Add(w.StartupDelay + sc.Step)); t = t.Add(sc.Step) {
+			l0 = max(l0, load(w.Name, t))
+		}
 		needed := cluster.Needed(l0, w.Capacity, cluster.DefaultHeadroom)
 		initial := min(max(needed, int32(w.MinReplicas)), int32(w.MaxReplicas)) //nolint:gosec // small
 		cl.AddWorkload(r.ns, w.Name, cluster.WorkloadSpec{

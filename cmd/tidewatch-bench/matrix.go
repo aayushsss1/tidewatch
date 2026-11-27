@@ -24,7 +24,7 @@ type Matrix struct {
 }
 
 // noGuardrails is the guardrails column of controller baselines, which have no profile.
-const noGuardrails = "-"
+const noGuardrails = "n/a"
 
 // plannedRun is one (scenario, config, guardrails, repeat) cell of the matrix.
 type plannedRun struct {
@@ -33,10 +33,11 @@ type plannedRun struct {
 	Config     string
 	Guardrails string
 	Repeat     int
+	Model      string // the agent's model; empty for configs that call no model
 }
 
 func (p plannedRun) key() string {
-	return fmt.Sprintf("%s|%s|%s|%d", p.ScenarioID, p.Config, p.Guardrails, p.Repeat)
+	return fmt.Sprintf("%s|%s|%s|%d|%s", p.ScenarioID, p.Config, p.Guardrails, p.Repeat, p.Model)
 }
 
 func loadMatrix(file string) (Matrix, error) {
