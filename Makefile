@@ -140,7 +140,8 @@ bench-kind: ## Real-cluster benchmark: make bench-kind CONFIGS=hpa,keda,tidewatc
 
 .PHONY: bench-kind-down
 bench-kind-down: ## Delete the bench-kind kind cluster.
-	$(KIND) delete cluster --name tidewatch-bench
+	$(KIND) delete cluster --name tidewatch-bench --kubeconfig bin/bench-kind.kubeconfig
+	rm -f bin/bench-kind.kubeconfig
 
 .PHONY: demo-e2e
 demo-e2e: manifests generate fmt vet ## Run hack/demo.sh and assert the prescale before the peak, Act 1 only (needs docker, kind, helm).

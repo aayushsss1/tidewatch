@@ -19,6 +19,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# A run takes hours; an idle-sleeping Mac stalls it. Re-exec under caffeinate once.
+if [ "$(uname)" = Darwin ] && [ -z "${BENCH_KIND_CAFFEINATED:-}" ] && command -v caffeinate >/dev/null 2>&1; then
+  export BENCH_KIND_CAFFEINATED=1
+  exec caffeinate -ims "$0" "$@"
+fi
+
 CLUSTER=tidewatch-bench
 CTX="kind-${CLUSTER}"
 KPS_VERSION=94.0.0
@@ -59,9 +65,23 @@ if [ "$NOTE_LEAD_MIN" -gt "$SURGE_AFTER_MIN" ]; then
   echo "NOTE_LEAD_MIN ($NOTE_LEAD_MIN) cannot exceed SURGE_AFTER_MIN ($SURGE_AFTER_MIN)" >&2; exit 1
 fi
 
+# A private kubeconfig, so this script never changes the user's current kubectl context.
+export KUBECONFIG="$ROOT/bin/bench-kind.kubeconfig"
+mkdir -p "$ROOT/bin"
+
+# `make deploy` rewrites config/manager/kustomization.yaml; put it back on exit if it was clean.
+KUSTOMIZATION=config/manager/kustomization.yaml
+KUSTOMIZATION_WAS_CLEAN=""
+if git diff --quiet -- "$KUSTOMIZATION" 2>/dev/null; then KUSTOMIZATION_WAS_CLEAN=1; fi
+restore_kustomization() {
+  if [ -n "$KUSTOMIZATION_WAS_CLEAN" ] && ! git diff --quiet -- "$KUSTOMIZATION" 2>/dev/null; then
+    git checkout -- "$KUSTOMIZATION"
+  fi
+}
+
 PF_PID=""
 pf_stop() { if [ -n "$PF_PID" ]; then kill "$PF_PID" >/dev/null 2>&1 || true; wait "$PF_PID" 2>/dev/null || true; PF_PID=""; fi; }
-trap pf_stop EXIT
+trap 'pf_stop; restore_kustomization' EXIT
 # Port-forward Prometheus to :$PROM_PORT (not 9090, which the demo may hold).
 pf_start() {
   pf_stop
@@ -86,7 +106,7 @@ setup_cluster() {
   else
     kind create cluster --name "$CLUSTER" --config demo/bench/kind.yaml
   fi
-  kubectl config use-context "$CTX" >/dev/null
+  kind export kubeconfig --name "$CLUSTER" >/dev/null
 
   step "metrics-server ${METRICS_SERVER_VERSION} (the HPA's CPU source)"
   helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ >/dev/null 2>&1 || true
@@ -277,6 +297,11 @@ run_config() {
       fi ;;
   esac
 
+  if [ "$(date +%s)" -ge "$T0" ]; then
+    echo "setup finished $(( $(date +%s) - T0 ))s after T0 ($(iso $T0)): the window would start before the traffic does." >&2
+    echo "Re-run with a larger LEAD_IN_SEC (now $LEAD_IN_SEC)." >&2
+    exit 1
+  fi
   step "traffic"
   sed -e "s|\${EPOCH}|$(iso $T0)|g" -e "s|\${SPIKE_AT}|$(iso $SPIKE)|g" \
       -e "s|\${RAMP}|${RAMP_MIN}m|g" -e "s|\${HOLD}|${HOLD_MIN}m|g" demo/bench/trafficgen.yaml | k apply -f -

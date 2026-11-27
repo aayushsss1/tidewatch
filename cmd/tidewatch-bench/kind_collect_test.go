@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"sigs.k8s.io/yaml"
 )
 
 func TestAccountMinutes(t *testing.T) {
@@ -35,8 +39,9 @@ func TestAccountMinutesCountsReadyOnlySamplesAsSkipped(t *testing.T) {
 }
 
 // fakeProm answers the queries collectKind makes from canned series.
-func fakeProm(t *testing.T) *httptest.Server {
+func fakeProm(t *testing.T, seen *[]url.Values) *httptest.Server {
 	t.Helper()
+	var mu sync.Mutex
 	series := func(vals ...string) string {
 		var b strings.Builder
 		for i, v := range vals {
@@ -52,11 +57,16 @@ func fakeProm(t *testing.T) *httptest.Server {
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
+		mu.Lock()
+		v := r.URL.Query()
+		v.Set("path", r.URL.Path)
+		*seen = append(*seen, v)
+		mu.Unlock()
 		var body string
 		switch {
-		case r.URL.Path == "/api/v1/query_range" && strings.HasPrefix(q, loadRule):
+		case r.URL.Path == pathRange && strings.Contains(q, loadRule):
 			body = series("30", "60", "160", "160", "40")
-		case r.URL.Path == "/api/v1/query_range" && strings.HasPrefix(q, readyRule):
+		case r.URL.Path == pathRange && strings.Contains(q, readyRule):
 			body = series("2", "1", "2", "4", "1")
 		case strings.HasPrefix(q, "changes("):
 			body = inst("3")
@@ -78,7 +88,8 @@ func fakeProm(t *testing.T) *httptest.Server {
 }
 
 func TestKindCollectWritesRows(t *testing.T) {
-	srv := fakeProm(t)
+	var seen []url.Values
+	srv := fakeProm(t, &seen)
 	defer srv.Close()
 	out := filepath.Join(t.TempDir(), "results.csv")
 	var stdout bytes.Buffer
@@ -132,4 +143,83 @@ func TestKindCollectWritesRows(t *testing.T) {
 	check(lead, "lift_rm", "")
 	check(other, "lead", "false")
 	check(other, "input_tokens", "0")
+
+	assertQueries(t, seen)
+}
+
+// assertQueries checks what was asked of Prometheus, not just what came back.
+func assertQueries(t *testing.T, seen []url.Values) {
+	t.Helper()
+	const window = "[300s]" // 22:13:20 to 22:18:20
+	var hist, changes, ranges int
+	for _, v := range seen {
+		q := v.Get("query")
+		switch {
+		case v.Get("path") == pathRange:
+			ranges++
+			if v.Get("step") != "60" || v.Get("start") != "1700000000" || v.Get("end") != "1700000300" {
+				t.Errorf("range params step/start/end = %s/%s/%s for %q", v.Get("step"), v.Get("start"), v.Get("end"), q)
+			}
+		case strings.Contains(q, "histogram_quantile"):
+			hist++
+			for _, want := range []string{"http_request_duration_seconds_bucket", "increase(", window, "by (le)", `app="`} {
+				if !strings.Contains(q, want) {
+					t.Errorf("histogram query %q lacks %q", q, want)
+				}
+			}
+			if v.Get("time") != "1700000300" {
+				t.Errorf("histogram evaluated at %s, want the window end", v.Get("time"))
+			}
+		case strings.HasPrefix(q, "changes("):
+			changes++
+			if !strings.Contains(q, "kube_deployment_spec_replicas") || !strings.Contains(q, window) {
+				t.Errorf("changes query %q", q)
+			}
+		}
+	}
+	// Two workloads: load and ready ranges each; p95 and p99 each; one changes() each.
+	if ranges != 4 || hist != 4 || changes != 2 {
+		t.Errorf("range/histogram/changes queries = %d/%d/%d, want 4/4/2", ranges, hist, changes)
+	}
+}
+
+func TestRulesFileMatchesCollector(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "demo", "bench", "rules.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Spec struct {
+			Groups []struct {
+				Rules []struct{ Record, Expr string } `yaml:"rules"`
+			} `yaml:"groups"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	exprs := map[string]string{}
+	for _, g := range doc.Spec.Groups {
+		for _, r := range g.Rules {
+			exprs[r.Record] = r.Expr
+		}
+	}
+	if e := exprs[readyRule]; !strings.Contains(e, "kube_deployment_status_replicas_ready") {
+		t.Errorf("%s expr = %q, want kube_deployment_status_replicas_ready", readyRule, e)
+	}
+	if e := exprs[loadRule]; !strings.Contains(e, "http_requests_total") {
+		t.Errorf("%s expr = %q", loadRule, e)
+	}
+}
+
+func TestRangeSeriesRejectsSeveralSeries(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"result":[` +
+			`{"metric":{"a":"1"},"values":[]},{"metric":{"a":"2"},"values":[]}]}}`))
+	}))
+	defer srv.Close()
+	pc := &promClient{base: srv.URL, hc: srv.Client()}
+	if _, err := pc.rangeSeries(context.Background(), "x", kindConfig{}); err == nil {
+		t.Fatal("two series should be an error")
+	}
 }

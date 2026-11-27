@@ -114,10 +114,14 @@ func burn(n int64) {
 func calibrate() int64 {
 	const probe = 20_000_000
 	burn(probe / 10) // warm up
-	start := time.Now()
-	burn(probe)
-	per := float64(probe) / (float64(time.Since(start)) / float64(time.Millisecond))
-	return int64(per)
+	time.Sleep(50 * time.Millisecond)
+	best := time.Duration(1<<63 - 1)
+	for range 3 { // the fastest probe is the least disturbed by other work on the node
+		start := time.Now()
+		burn(probe)
+		best = min(best, time.Since(start))
+	}
+	return int64(float64(probe) / (float64(best) / float64(time.Millisecond)))
 }
 
 func (a *app) callDownstream() {

@@ -35,6 +35,7 @@ var kindHeader = append(append([]string{}, csvHeader...), "env", "p95_ms", "p99_
 
 const (
 	paramQuery = "query"
+	pathRange  = "/api/v1/query_range"
 	trueStr    = "true"
 	kindEnv    = "kind"
 	loadRule   = "bench:load_rps"
@@ -171,9 +172,10 @@ func parseSample(v [2]any) (point, bool) {
 	return point{T: int64(math.Round(ts)), V: f}, true
 }
 
-// rangeSeries returns the single series of a range query, or nil when it matched nothing.
+// rangeSeries returns the single series of a range query, nil when it matched nothing, and an
+// error when it matched several (the join on timestamp would silently mix them).
 func (c *promClient) rangeSeries(ctx context.Context, query string, kc kindConfig) ([]point, error) {
-	pr, err := c.get(ctx, "/api/v1/query_range", url.Values{
+	pr, err := c.get(ctx, pathRange, url.Values{
 		paramQuery: {query}, "step": {strconv.Itoa(int(kindStep.Seconds()))},
 		"start": {strconv.FormatInt(kc.Start.Unix(), 10)}, "end": {strconv.FormatInt(kc.End.Unix(), 10)},
 	})
@@ -182,6 +184,9 @@ func (c *promClient) rangeSeries(ctx context.Context, query string, kc kindConfi
 	}
 	if len(pr.Data.Result) == 0 {
 		return nil, nil
+	}
+	if len(pr.Data.Result) > 1 {
+		return nil, fmt.Errorf("query %q matched %d series, want 1", query, len(pr.Data.Result))
 	}
 	var out []point
 	for _, v := range pr.Data.Result[0].Values {
@@ -279,11 +284,11 @@ func collectKind(ctx context.Context, pc *promClient, kc kindConfig) ([][]string
 	rows := make([][]string, 0, len(kc.Workloads))
 	for i, w := range kc.Workloads {
 		sel := fmt.Sprintf(`app=%q`, w)
-		load, err := pc.rangeSeries(ctx, fmt.Sprintf(`%s{%s}`, loadRule, sel), kc)
+		load, err := pc.rangeSeries(ctx, fmt.Sprintf(`last_over_time(%s{%s}[1m])`, loadRule, sel), kc)
 		if err != nil {
 			return nil, err
 		}
-		ready, err := pc.rangeSeries(ctx, fmt.Sprintf(`%s{%s}`, readyRule, sel), kc)
+		ready, err := pc.rangeSeries(ctx, fmt.Sprintf(`last_over_time(%s{%s}[1m])`, readyRule, sel), kc)
 		if err != nil {
 			return nil, err
 		}

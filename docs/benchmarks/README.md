@@ -212,7 +212,13 @@ is passed to the operator through a Secret created over stdin and is never print
 
 The script (`hack/bench-kind.sh`) creates a cluster named `tidewatch-bench` (separate from the
 demo's), installs metrics-server, kube-prometheus-stack and the operator, and runs the configs one
-after another. Chart versions are pinned in the script. `make bench-kind-down` deletes the cluster.
+after another. Chart versions are pinned in the script. On macOS the script re-executes itself under
+`caffeinate -ims` so an idle-sleeping laptop does not stall a multi-hour run. It uses its own
+kubeconfig (`bin/bench-kind.kubeconfig`), so your current kubectl context is untouched, and it
+restores `config/manager/kustomization.yaml` on exit if `make deploy` changed it. It aborts if setup
+overruns the lead-in before the traffic starts (raise `LEAD_IN_SEC`). `make bench-kind-down` deletes the
+cluster and the kubeconfig; the `tidewatch-llm` Secret (the API key, for the agent config) stays in the
+cluster until then.
 Each config takes about an hour (set `SURGE_AFTER_MIN`, `NOTE_LEAD_MIN`, `HOLD_MIN` and `TAIL_MIN`
 for a shorter timeline). Results go to `bin/bench-kind/results.csv`, plus per-config replica logs and
 operator logs in the same directory.
@@ -227,7 +233,7 @@ the HPA never manage the same workload at once.
 Traffic is a gentle 20-minute cycle of 60 to 80 rps on the frontend. At 25 minutes a 4x surge ramps
 over 2 minutes and holds for 15, followed by an 8 minute tail. The `api` and `worker` Deployments
 receive the surge through the frontend's downstream calls (api at once, worker 90s later). Each pod
-serves 50 rps and takes about 45s to become ready. A note, "Flash sale at HH:MM UTC, expect ~4x
+serves 50 rps and takes about 45s to become ready. A note, "Flash sale at HH:MM UTC, expect ~4×
 traffic on frontend", is published 20 minutes before the surge.
 
 | config | what runs |
