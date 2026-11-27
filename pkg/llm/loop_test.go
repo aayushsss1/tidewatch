@@ -178,10 +178,78 @@ func TestRun_TruncatesLargeToolOutput(t *testing.T) {
 
 func TestRun_NoToolCall(t *testing.T) {
 	end := &fakeTool{name: toolEnd, terminal: true}
-	p := &llmtest.Scripted{Turns: []llm.TurnResponse{{Message: llm.Message{Role: llm.RoleAssistant, Text: "hi"}}}}
+	p := &llmtest.Scripted{Turns: []llm.TurnResponse{text("hi"), text("still no")}}
 	out, _, _ := llm.Run(context.Background(), p, "s", "b", []llm.Tool{end}, lim)
 	if out.Exit != "no_tool_call" || out.Final != nil {
 		t.Fatalf("out=%+v", out)
+	}
+}
+
+func text(s string) llm.TurnResponse {
+	return llm.TurnResponse{Message: llm.Message{Role: llm.RoleAssistant, Text: s}}
+}
+
+func TestRun_NudgeThenTerminal(t *testing.T) {
+	end := &fakeTool{name: toolEnd, terminal: true}
+	p := &llmtest.Scripted{Turns: []llm.TurnResponse{text("thinking"), call(toolEnd)}}
+	out, _, err := llm.Run(context.Background(), p, "s", "b", []llm.Tool{end}, lim)
+	if err != nil || out.Exit != llm.ExitTerminal || out.Final == nil {
+		t.Fatalf("out=%+v err=%v", out, err)
+	}
+	msgs := p.Calls[1].Messages
+	if len(msgs) != 3 || msgs[1].Role != llm.RoleAssistant || msgs[1].Text != "thinking" ||
+		msgs[2].Role != llm.RoleUser || msgs[2].Text != llm.NudgeText {
+		t.Fatalf("messages after nudge: %+v", msgs)
+	}
+}
+
+func TestRun_NudgeOnlyOnce(t *testing.T) {
+	end := &fakeTool{name: toolEnd, terminal: true}
+	p := &llmtest.Scripted{Turns: []llm.TurnResponse{text("a"), text("b"), call(toolEnd)}}
+	out, _, _ := llm.Run(context.Background(), p, "s", "b", []llm.Tool{end}, lim)
+	if out.Exit != llm.ExitNoToolCall || len(p.Calls) != 2 {
+		t.Fatalf("out=%+v calls=%d", out, len(p.Calls))
+	}
+}
+
+func TestRun_NudgeCountsTowardMaxToolCalls(t *testing.T) {
+	end := &fakeTool{name: toolEnd, terminal: true}
+	p := &llmtest.Scripted{Turns: []llm.TurnResponse{text("a"), call(toolEnd)}}
+	out, _, _ := llm.Run(context.Background(), p, "s", "b", []llm.Tool{end}, twoTurns)
+	if out.Exit != llm.ExitForcedFinal {
+		t.Fatalf("exit = %s, want forced_final (the nudge used turn 1 of 2)", out.Exit)
+	}
+	if p.Calls[1].Choice != llm.ChoiceFinal {
+		t.Fatalf("turn after nudge choice = %s, want final", p.Calls[1].Choice)
+	}
+	// A text-only reply on the forced final turn is not nudged again.
+	p = &llmtest.Scripted{Turns: []llm.TurnResponse{text("a"), text("b")}}
+	out, _, _ = llm.Run(context.Background(), p, "s", "b", []llm.Tool{end}, twoTurns)
+	if out.Exit != llm.ExitNoToolCall || len(p.Calls) != 2 {
+		t.Fatalf("out=%+v calls=%d", out, len(p.Calls))
+	}
+}
+
+func TestRun_ObserverSeesEveryTurn(t *testing.T) {
+	q := &fakeTool{name: toolQuery, out: "hello"}
+	end := &fakeTool{name: toolEnd, terminal: true}
+	p := &llmtest.Scripted{Turns: []llm.TurnResponse{
+		tokens(text("hm"), 10, 1), tokens(call(toolQuery), 20, 2), tokens(call(toolEnd), 30, 3)}}
+	var turns []llm.Turn
+	l := lim
+	l.Observer = func(t llm.Turn) { turns = append(turns, t) }
+	out, _, _ := llm.Run(context.Background(), p, "s", "b", []llm.Tool{q, end}, l)
+	if out.Exit != llm.ExitTerminal || len(turns) != 3 {
+		t.Fatalf("out=%+v turns=%d", out, len(turns))
+	}
+	if !turns[0].Nudged || turns[0].Exit != "" || turns[0].Response.InputTokens != 10 {
+		t.Errorf("turn 1 = %+v", turns[0])
+	}
+	if r := turns[1].ToolResult; r == nil || r.Content != llm.WrapData("query", "hello") || turns[1].Response.Message.ToolCall.Name != toolQuery {
+		t.Errorf("turn 2 = %+v", turns[1])
+	}
+	if turns[2].Exit != llm.ExitTerminal || turns[2].ToolResult != nil || turns[2].N != 3 {
+		t.Errorf("turn 3 = %+v", turns[2])
 	}
 }
 

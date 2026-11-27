@@ -30,6 +30,28 @@ const (
 type Limits struct {
 	MaxToolCalls int
 	MaxTokens    int
+	// Observer, when non-nil, is called synchronously once per model turn. It must not
+	// retain or modify Turn.Request.Messages, which the loop keeps appending to.
+	Observer func(Turn)
+}
+
+// NudgeText is the user message sent after a text-only reply that is not on the final turn.
+const NudgeText = "Call propose_scaling or no_action now. Do not reply with text only."
+
+// Turn is what Observer sees for one model turn.
+type Turn struct {
+	N        int // 1-based
+	Request  TurnRequest
+	Response TurnResponse // zero when the provider failed
+	// ToolResult is the result appended for the turn's tool call, as sent back to the
+	// model (wrapped and truncated). Nil for terminal calls, nudges and failed turns.
+	ToolResult *ToolResult
+	// Nudged is true when the turn was text-only and the loop appended NudgeText.
+	Nudged bool
+	// Exit is set only on the loop's last turn.
+	Exit Exit
+	// Err is the provider error, if any.
+	Err error
 }
 
 // Outcome is the result of Run. Final is set only for terminal/forced_final.
@@ -88,11 +110,17 @@ func Run(
 		}
 	}
 
+	observe := func(Turn) {}
+	if lim.Observer != nil {
+		observe = lim.Observer
+	}
+	nudged := false
 	var lastIn, growth int
 	for turn := 1; ; turn++ {
 		used := out.InputTokens + out.OutputTokens
 		if lim.MaxTokens > 0 && used > lim.MaxTokens {
 			out.Exit = ExitTokenCap
+			observe(Turn{N: turn, Exit: out.Exit})
 			return out, trace, nil
 		}
 		final := turn >= lim.MaxToolCalls
@@ -112,13 +140,15 @@ func Run(
 			switch {
 			case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
 				out.Exit = ExitDeadline
-				return out, trace, nil
 			case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
 				out.Exit = ExitCancelled
-				return out, trace, nil
+			default:
+				out.Exit = ExitProviderError
+				observe(Turn{N: turn, Request: req, Exit: out.Exit, Err: err})
+				return out, trace, err
 			}
-			out.Exit = ExitProviderError
-			return out, trace, err
+			observe(Turn{N: turn, Request: req, Exit: out.Exit, Err: err})
+			return out, trace, nil
 		}
 		growth = max(resp.InputTokens-lastIn, 0)
 		lastIn = resp.InputTokens
@@ -127,8 +157,20 @@ func Run(
 
 		call := resp.Message.ToolCall
 		if call == nil {
-			out.Exit = ExitNoToolCall
-			return out, trace, nil
+			if final || nudged {
+				out.Exit = ExitNoToolCall
+				observe(Turn{N: turn, Request: req, Response: resp, Exit: out.Exit})
+				return out, trace, nil
+			}
+			// One chance to recover from a text-only reply; the nudge costs a turn.
+			nudged = true
+			asst := resp.Message
+			if asst.Text == "" {
+				asst.Text = "(no response)" // providers reject empty assistant messages
+			}
+			msgs = append(msgs, asst, Message{Role: RoleUser, Text: NudgeText})
+			observe(Turn{N: turn, Request: req, Response: resp, Nudged: true})
+			continue
 		}
 		if t, ok := byName[call.Name]; ok && t.Terminal() {
 			out.Final = call
@@ -136,10 +178,12 @@ func Run(
 			if final {
 				out.Exit = ExitForcedFinal
 			}
+			observe(Turn{N: turn, Request: req, Response: resp, Exit: out.Exit})
 			return out, trace, nil
 		}
 		if final { // forced turn must end in a terminal call
 			out.Exit = ExitNoToolCall
+			observe(Turn{N: turn, Request: req, Response: resp, Exit: out.Exit})
 			return out, trace, nil
 		}
 
@@ -161,5 +205,6 @@ func Run(
 			Latency:     time.Since(start),
 		})
 		msgs = append(msgs, resp.Message, Message{Role: RoleTool, ToolResult: &res})
+		observe(Turn{N: turn, Request: req, Response: resp, ToolResult: &res})
 	}
 }

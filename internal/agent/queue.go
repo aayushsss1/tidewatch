@@ -96,6 +96,21 @@ func (q *Queue) Pop(ctx context.Context) (*Incident, time.Time, bool) {
 	}
 }
 
+// TryPop is Pop without blocking: it returns false when nothing live is queued.
+func (q *Queue) TryPop() (*Incident, time.Time, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for q.h.Len() > 0 {
+		it := heap.Pop(&q.h).(*qItem)
+		if !q.clk.Now().Before(it.deadline) {
+			q.dropped = append(q.dropped, it.inc)
+			continue
+		}
+		return it.inc, it.deadline, true
+	}
+	return nil, time.Time{}, false
+}
+
 // Dropped returns and clears the incidents dropped for passing their deadline.
 func (q *Queue) Dropped() []*Incident {
 	q.mu.Lock()

@@ -57,6 +57,11 @@ type RunnerOptions struct {
 	Provider           llm.Provider // nil disables the agent: incidents and episodes are still recorded
 	WebhookURL         string
 	Clock              clock.Clock
+	// PromFactory builds the Prometheus client the agent's query_metrics tool uses;
+	// nil means prom.New. The simulator injects a simulated one.
+	PromFactory PromFactory
+	// Observer receives every investigation's model turns; nil disables it.
+	Observer func(incidentID string) func(llm.Turn)
 }
 
 // closedIncident is an incident that closed but is not recorded yet because
@@ -129,7 +134,10 @@ func NewRunner(
 		Episodes: episodes.Finder(&episodes.Reader{R: r}, run.finderQuery),
 		Notifier: run.notifier, Budget: NewBudget(o.TokenBudgetPerHour, o.Clock),
 		Breaker: NewBreaker(breakerTrips, breakerOpen, o.Clock), Clock: o.Clock,
-		Correlator: corr, PromFactory: prom.New,
+		Correlator: corr, PromFactory: o.PromFactory, Observer: o.Observer,
+	}
+	if run.inv.PromFactory == nil {
+		run.inv.PromFactory = prom.New
 	}
 	return run
 }
@@ -334,6 +342,22 @@ func (r *Runner) worker(ctx context.Context) {
 		r.process(ctx, inc, deadline)
 		queueDepth.Set(float64(r.queue.Len()))
 	}
+}
+
+// RunPending synchronously processes every incident currently queued and returns how
+// many it processed. It is for the simulator only: production uses Start's workers.
+func (r *Runner) RunPending(ctx context.Context) int {
+	n := 0
+	for ctx.Err() == nil {
+		inc, deadline, ok := r.queue.TryPop()
+		if !ok {
+			break
+		}
+		r.process(ctx, inc, deadline)
+		n++
+	}
+	queueDepth.Set(float64(r.queue.Len()))
+	return n
 }
 
 // policyRefOf returns the policy that governs inc; a storm uses its lead's.

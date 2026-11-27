@@ -764,7 +764,8 @@ func TestInvestigator_NoActionAndFailedExitsLeaveHeldDecision(t *testing.T) {
 			f.prov.Errs = []error{errors.New("boom")}
 		}, "provider_error", true},
 		"no_tool_call": {func(f *fixture) {
-			f.prov.Turns = []llm.TurnResponse{{Message: llm.Message{Role: llm.RoleAssistant, Text: "hm"}}}
+			hm := llm.TurnResponse{Message: llm.Message{Role: llm.RoleAssistant, Text: "hm"}}
+			f.prov.Turns = []llm.TurnResponse{hm, hm}
 		}, "no_tool_call", false},
 	}
 	for name, tc := range cases {
@@ -814,5 +815,23 @@ func TestSystemPrompt_OverrideDurationGuidance(t *testing.T) {
 		if !strings.Contains(systemPrompt, want) {
 			t.Fatalf("system prompt lacks %q", want)
 		}
+	}
+}
+
+func TestInvestigator_ObserverReceivesTurnsTaggedWithIncident(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Auto", "frontend-obs")
+	f.propose(0.9, ovIn{Workload: "frontend-obs", MinReplicas: 9})
+	var ids []string
+	var turns []llm.Turn
+	f.iv.Observer = func(id string) func(llm.Turn) {
+		ids = append(ids, id)
+		return func(t llm.Turn) { turns = append(turns, t) }
+	}
+	f.iv.Investigate(f.ctx, f.incident("frontend-obs"), f.deadline())
+	if len(ids) != 1 || ids[0] != testInc {
+		t.Fatalf("observer factory calls = %v, want [%s]", ids, testInc)
+	}
+	if len(turns) == 0 || turns[len(turns)-1].Exit != llm.ExitTerminal {
+		t.Fatalf("turns = %+v", turns)
 	}
 }

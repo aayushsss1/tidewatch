@@ -306,3 +306,27 @@ func TestRunner_AnnouncesExpiry(t *testing.T) {
 		t.Errorf("missing OverrideExpired in:\n%s", evs)
 	}
 }
+
+func TestRunner_RunPendingProcessesQueuedIncidents(t *testing.T) {
+	f := newFixture(t, v1.ModeActive, "Auto", "frontend-pending")
+	f.cleanEpisodes()
+	r, _ := f.runner(true)
+	if n := r.RunPending(f.ctx); n != 0 {
+		t.Fatalf("RunPending on an empty queue = %d, want 0", n)
+	}
+	f.propose(0.9, ovIn{Workload: "frontend-pending", MinReplicas: 12})
+	r.Submit(f.trigger("frontend-pending", signal.ForecastBreach, f.clk.Now()))
+	r.RunOnce(f.ctx)
+	if r.queue.Len() != 1 {
+		t.Fatalf("queue = %d, want 1", r.queue.Len())
+	}
+	if n := r.RunPending(f.ctx); n != 1 {
+		t.Fatalf("RunPending = %d, want 1", n)
+	}
+	if _, o := f.store.Active(f.uids["frontend-pending"], f.clk.Now()); o == nil || o.MinReplicas != 12 {
+		t.Fatalf("override not stored: %+v", o)
+	}
+	if n := r.RunPending(f.ctx); n != 0 {
+		t.Fatalf("second RunPending = %d, want 0", n)
+	}
+}
