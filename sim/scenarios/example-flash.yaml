@@ -1,0 +1,42 @@
+# Example scenario: one synthetic diurnal service hit by a 3x flash sale, plus a chained
+# downstream API.
+# Convention: every offset (start, events, notes, lag) is measured from the trace origin.
+# `start` is where measurement begins; `history` precedes it, so the series covers
+# [start - history, start + duration]. Events and notes must fall inside that window.
+# Overlapping events multiply. Non-periodic traces (azure2019) must cover the window or set
+# `wrap: true`.
+name: example-flash
+seed: 1
+trace:
+  type: synthetic:diurnal
+  base: 20
+  amp: 120
+  period: 24h
+  noise: 0.05
+  seed: 1
+start: 6h
+duration: 6h
+step: 1m
+history: 72h
+workloads:
+  - name: frontend
+    capacity: 10
+    startupDelay: 60s
+    minReplicas: 2
+    maxReplicas: 60
+  - name: api
+    capacity: 12
+    startupDelay: 45s
+    minReplicas: 2
+    maxReplicas: 60
+    lag: 90s
+    scale: 0.8
+events:
+  - kind: surge
+    start: 9h
+    ramp: 3m
+    hold: 30m
+    mult: 3
+notes:
+  - publishAt: 8h15m
+    text: "Flash sale starts at 09:00, expect ~3x traffic for about 30 minutes."

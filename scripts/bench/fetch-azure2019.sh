@@ -8,11 +8,19 @@ URL="https://github.com/Azure/AzurePublicDataset/releases/download/dataset-funct
 CACHE="${TIDEWATCH_BENCH_CACHE:-$HOME/.cache/tidewatch-bench}"
 DEST="$CACHE/azure2019"
 
+SUMS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/azure2019.sha256"
+
+# verify checks every extracted file against the pinned SHA-256s.
+verify() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$1" && sha256sum -c --quiet "$SUMS")
+  else
+    (cd "$1" && shasum -a 256 -c --quiet "$SUMS")
+  fi
+}
+
 have_all() {
-  local d
-  for d in 01 02 03 04 05 06 07 08 09 10 11 12 13 14; do
-    [ -s "$DEST/invocations_per_function_md.anon.d$d.csv" ] || return 1
-  done
+  verify "$DEST" >/dev/null 2>&1
 }
 
 if have_all; then
@@ -33,6 +41,9 @@ if tar --version 2>/dev/null | grep -q 'GNU tar'; then wild=(--wildcards); fi
 tar -xJf "$tmp/dataset.tar.xz" -C "$tmp" ${wild[@]+"${wild[@]}"} '*invocations_per_function_md.anon.d*.csv'
 find "$tmp" -name 'invocations_per_function_md.anon.d*.csv' -exec mv -f {} "$DEST/" \;
 
-have_all || { echo "azure2019: expected 14 invocation files in $DEST" >&2; exit 1; }
+if ! verify "$DEST"; then
+  echo "azure2019: SHA-256 verification failed for files in $DEST (see scripts/bench/azure2019.sha256)" >&2
+  exit 1
+fi
 echo "azure2019: done, files in $DEST"
 echo "Data: Azure Functions Trace 2019, CC-BY-4.0, Shahrad et al., USENIX ATC 2020."
