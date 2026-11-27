@@ -152,7 +152,7 @@ func TestRun_TidewatchAgentOverrideApplied(t *testing.T) {
 		t.Errorf("agent underprov/breach %v/%v exceed paired baseline %v/%v",
 			got.under, got.breach, want.under, want.breach)
 	}
-	if want := filepath.Join(dir, "example-flash-tidewatch-agent-0.jsonl"); res.TranscriptPath != want {
+	if want := filepath.Join(dir, "example-flash-tidewatch-agent-matched-0.jsonl"); res.TranscriptPath != want {
 		t.Errorf("transcript path = %q, want %q", res.TranscriptPath, want)
 	}
 	if st, err := os.Stat(res.TranscriptPath); err != nil || st.Size() == 0 {

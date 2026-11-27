@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,7 @@ const (
 	profMatched      = string(harness.GuardrailsMatched)
 	idFlash          = "grp/a-flash"
 	leadName         = "frontend"
+	testKey          = "sk-test"
 )
 
 const testScenario = `
@@ -198,7 +200,7 @@ func TestRunMaxUSD(t *testing.T) {
 	mf := fixture(t, "repeats: {tidewatch-agent: 5}\n")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, "sk-test"
+	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, testKey
 	rc.Configs, rc.MaxUSD = []string{cfgAgent}, 0.25
 	var out bytes.Buffer
 	if err := execute(context.Background(), rc, &out); err != nil {
@@ -238,11 +240,34 @@ func col(rows [][]string, name string) int {
 	return -1
 }
 
+func TestAnthropicAgentRunNeedsSpendCap(t *testing.T) {
+	mf := fixture(t, "")
+	var calls []plannedRun
+	rc := fakeRC(t, mf, &calls)
+	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, testKey
+	err := execute(context.Background(), rc, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--max-usd 5") {
+		t.Fatalf("err = %v, want a message suggesting --max-usd 5", err)
+	}
+	if len(calls) != 0 {
+		t.Error("must refuse before running anything")
+	}
+	// Plans without an agent run, and the scripted provider, need no cap.
+	rc.Configs = []string{cfgHPA}
+	if err := execute(context.Background(), rc, &bytes.Buffer{}); err != nil {
+		t.Fatalf("non-agent plan: %v", err)
+	}
+	rc.Configs, rc.Provider, rc.Out = nil, providerScripted, filepath.Join(t.TempDir(), "o")
+	if err := execute(context.Background(), rc, &bytes.Buffer{}); err != nil {
+		t.Fatalf("scripted: %v", err)
+	}
+}
+
 func TestAgentNeedsKey(t *testing.T) {
 	mf := fixture(t, "")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.key = providerAnthropic, ""
+	rc.Provider, rc.key, rc.MaxUSD = providerAnthropic, "", 5
 	err := execute(context.Background(), rc, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), keyEnv) {
 		t.Fatalf("err = %v, want a message naming %s", err, keyEnv)
@@ -256,7 +281,7 @@ func TestAgentNeedsKey(t *testing.T) {
 		t.Fatalf("non-agent run: %v", err)
 	}
 	// The key never appears in an error.
-	rc.key, rc.Model, rc.Configs = "sk-secret-value", "no-such-model", nil
+	rc.key, rc.Model, rc.Configs, rc.MaxUSD = "sk-secret-value", "no-such-model", nil, 5
 	rc.Out = filepath.Join(t.TempDir(), "o")
 	err = execute(context.Background(), rc, &bytes.Buffer{})
 	if err == nil || strings.Contains(err.Error(), "sk-secret-value") {
@@ -268,12 +293,25 @@ func TestUSD(t *testing.T) {
 	for model, want := range map[string]float64{
 		defaultModel: 0.6, "claude-sonnet-5-5": 12, "claude-opus-5-5": 24,
 	} {
-		if got, ok := usd(model, 1_000_000, 1_000_000); !ok || got != want {
+		if got, ok := usd(model, 1_000_000, 1_000_000, 0, 0); !ok || got != want {
 			t.Errorf("%s: %v %v, want %v", model, got, ok, want)
 		}
 	}
-	if _, ok := usd("x", 1, 1); ok {
+	if _, ok := usd("x", 1, 1, 0, 0); ok {
 		t.Error("unknown model must report !ok")
+	}
+}
+
+func TestUSDLongPromptTier(t *testing.T) {
+	// 1M in / 1M out in total, of which 400K in / 100K out came from calls over 100K tokens.
+	got, ok := usd(defaultModel, 1_000_000, 1_000_000, 400_000, 100_000)
+	want := (0.6e6*0.10 + 0.9e6*0.50 + 0.4e6*0.50 + 0.1e6*2.50) / 1e6
+	if !ok || math.Abs(got-want) > 1e-9 {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	// A model without a long tier ignores the split.
+	if a, _ := usd("claude-sonnet-5-5", 1e6, 1e6, 5e5, 5e5); a != 12 {
+		t.Fatalf("sonnet = %v", a)
 	}
 }
 
@@ -390,7 +428,7 @@ func TestFailedRunCountsTokensAndIsReported(t *testing.T) {
 	mf := fixture(t, "")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.key = providerAnthropic, "sk-test"
+	rc.Provider, rc.key, rc.MaxUSD = providerAnthropic, testKey, 100
 	rc.Configs = []string{cfgAgent}
 	ok := rc.exec
 	rc.exec = func(ctx context.Context, sc *scenario.Scenario, p plannedRun, seed int64) (harness.Result, error) {
@@ -417,6 +455,31 @@ func TestFailedRunCountsTokensAndIsReported(t *testing.T) {
 	}
 	if p.spent < 0.399 || p.spent > 0.401 || p.agentRuns != 2 || len(p.done) != 1 {
 		t.Errorf("prior = %+v, want spend 0.40 (failed run's tokens included), 2 agent runs, 1 done", p)
+	}
+}
+
+func TestInterruptedRunRecordsSpend(t *testing.T) {
+	mf := fixture(t, "")
+	var calls []plannedRun
+	rc := fakeRC(t, mf, &calls)
+	rc.Provider, rc.key, rc.MaxUSD = providerAnthropic, testKey, 100
+	rc.Configs = []string{cfgAgent}
+	ctx, cancel := context.WithCancel(context.Background())
+	ok := rc.exec
+	rc.exec = func(c context.Context, sc *scenario.Scenario, p plannedRun, seed int64) (harness.Result, error) {
+		res, _ := ok(c, sc, p, seed)
+		cancel()
+		return res, context.Canceled
+	}
+	if err := execute(ctx, rc, &bytes.Buffer{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	p, err := readPrior(filepath.Join(rc.Out, "results.csv"), filepath.Join(rc.Out, "failed.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.spent < 0.199 || p.spent > 0.201 || p.agentRuns != 1 || len(p.done) != 0 {
+		t.Errorf("prior = %+v, want the interrupted run's $0.20 and 1 agent run, none done", p)
 	}
 }
 

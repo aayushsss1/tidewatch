@@ -68,7 +68,8 @@ func TestFutureIsNaN(t *testing.T) {
 	s, _, clk := setup(t)
 	now := clk.Now()
 	got, _ := s.RangeSeries(
-		context.Background(), `x{app="frontend"}`, now.Add(-2*time.Minute), now.Add(3*time.Minute), time.Minute)
+		context.Background(), `http_requests_total{app="frontend"}`,
+		now.Add(-2*time.Minute), now.Add(3*time.Minute), time.Minute)
 	for i, p := range got.Points {
 		if p.T.After(now) != math.IsNaN(p.V) {
 			t.Fatalf("point %d (%v) v=%v", i, p.T, p.V)
@@ -79,8 +80,8 @@ func TestFutureIsNaN(t *testing.T) {
 func TestAppMatcherSelectsWorkload(t *testing.T) {
 	s, _, clk := setup(t)
 	now := clk.Now()
-	a, _ := s.RangeSeries(context.Background(), `rate(r{app="frontend"}[5m])`, now, now, time.Minute)
-	b, _ := s.RangeSeries(context.Background(), `r{namespace="n", app="api"}`, now, now, time.Minute)
+	a, _ := s.RangeSeries(context.Background(), `rate(http_requests_total{app="frontend"}[5m])`, now, now, time.Minute)
+	b, _ := s.RangeSeries(context.Background(), `http_requests_total{namespace="n", app="api"}`, now, now, time.Minute)
 	if math.IsNaN(a.Points[0].V) || math.IsNaN(b.Points[0].V) || a.Points[0].V == b.Points[0].V {
 		t.Fatalf("a=%v b=%v", a.Points[0].V, b.Points[0].V)
 	}
@@ -113,7 +114,7 @@ func TestConcurrentNewSharedScenario(t *testing.T) {
 			epoch := time.Date(2030+i, 1, 1, 0, 0, 0, 0, time.UTC)
 			s := New(sc, clocktesting.NewFakeClock(epoch.Add(6*time.Hour)), epoch, nil)
 			at := epoch.Add(6 * time.Hour)
-			got, _ := s.RangeSeries(context.Background(), `x{app="frontend"}`, at, at, time.Minute)
+			got, _ := s.RangeSeries(context.Background(), `http_requests_total{app="frontend"}`, at, at, time.Minute)
 			if math.IsNaN(got.Points[0].V) {
 				t.Error("NaN")
 			}
@@ -133,5 +134,35 @@ func TestFactory(t *testing.T) {
 	}
 	if err := q.Ready(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOnlyLoadQueriesResolve(t *testing.T) {
+	s, _, clk := setup(t)
+	now := clk.Now()
+	cases := []struct {
+		q        string
+		wantData bool
+	}{
+		{`sum(rate(http_requests_total{app="frontend"}[1m]))`, true},
+		{`sum(rate(http_requests_total{app="frontend"}[5m]))`, true},
+		{`sum by (app) (irate(http_requests_total{app="frontend"}[5m]))`, true},
+		{`histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{app="frontend"}[5m])))`, false},
+		{`sum(increase(http_requests_total{app="frontend"}[1h]))`, false},
+		{`sum(rate(http_requests_total{app="frontend"}[5m])) * 2`, false},
+		{`sum(rate(container_cpu_usage_seconds_total{app="frontend"}[5m]))`, false},
+	}
+	for _, c := range cases {
+		got, err := s.RangeSeries(context.Background(), c.q, now.Add(-5*time.Minute), now, time.Minute)
+		if err != nil {
+			t.Fatalf("%q: %v", c.q, err)
+		}
+		has := false
+		for _, p := range got.Points {
+			has = has || !math.IsNaN(p.V)
+		}
+		if has != c.wantData {
+			t.Errorf("%q: data=%v want %v", c.q, has, c.wantData)
+		}
 	}
 }

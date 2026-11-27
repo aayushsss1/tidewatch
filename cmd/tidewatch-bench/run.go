@@ -105,7 +105,7 @@ func (rc *runConfig) provider() (llm.Provider, error) {
 			return nil, fmt.Errorf("the %s config needs %s for --provider anthropic (use --provider scripted for a free run)",
 				baselines.NameTWAgent, keyEnv)
 		}
-		if _, ok := usd(rc.Model, 0, 0); !ok {
+		if _, ok := usd(rc.Model, 0, 0, 0, 0); !ok {
 			return nil, fmt.Errorf("no price for model %q; add it to the price table in cmd/tidewatch-bench/price.go", rc.Model)
 		}
 		return anthropic.New(rc.key, rc.Model), nil
@@ -113,13 +113,23 @@ func (rc *runConfig) provider() (llm.Provider, error) {
 	return nil, fmt.Errorf("--provider %q: want anthropic or scripted", rc.Provider)
 }
 
+// paidProvider builds the provider and, for the paid one, insists on a spend cap.
+func (rc *runConfig) paidProvider() (llm.Provider, error) {
+	prov, err := rc.provider()
+	if err != nil {
+		return nil, err
+	}
+	if rc.Provider == providerAnthropic && rc.MaxUSD <= 0 {
+		return nil, errors.New("run: this plan makes paid model calls; refusing to start without a spend cap. " +
+			"Pass --max-usd (for example --max-usd 5)")
+	}
+	return prov, nil
+}
+
 // harnessExec returns the executor that drives the real harness.
 func (rc *runConfig) harnessExec(prov llm.Provider) executor {
 	return func(ctx context.Context, sc *scenario.Scenario, p plannedRun, seed int64) (harness.Result, error) {
-		td := filepath.Join(rc.Out, "transcripts")
-		if rc.Guardrails == "both" && p.Guardrails == string(harness.GuardrailsDefault) {
-			td = filepath.Join(td, "default")
-		}
+		td := filepath.Join(rc.Out, "transcripts") // file names carry the guardrails profile
 		e, err := baselines.New(p.Config, sc, baselines.Options{
 			Provider: prov, Model: rc.Model, Guardrails: harness.Guardrails(p.Guardrails),
 		})
@@ -160,7 +170,7 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 	}
 	var prov llm.Provider
 	if slices.ContainsFunc(runs, func(p plannedRun) bool { return p.Config == baselines.NameTWAgent }) {
-		if prov, err = rc.provider(); err != nil {
+		if prov, err = rc.paidProvider(); err != nil {
 			return err
 		}
 	}
@@ -239,7 +249,7 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 		t0 := time.Now()
 		res, err := exec(ctx, cur, p, seed)
 		wall := time.Since(t0).Seconds()
-		cost, _ := usd(p.Model, res.InputTokens, res.OutputTokens) // tokens of a failed run still count
+		cost := resultCost(p.Model, res) // tokens of a failed run still count
 		spent += cost
 		sessionSpent += cost
 		if p.Config == baselines.NameTWAgent {
@@ -247,6 +257,11 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 		}
 		if err != nil {
 			if ctx.Err() != nil {
+				// Record the tokens already spent on the interrupted run so --max-usd counts them on resume.
+				if werr := failOut.write([][]string{{p.ScenarioID, p.Config, p.Guardrails, strconv.Itoa(p.Repeat), p.Model,
+					strconv.FormatFloat(cost, 'f', 6, 64), "interrupted: " + err.Error()}}); werr != nil {
+					return werr
+				}
 				return fmt.Errorf("interrupted during run %d of %d (%s %s): %w", i+1, total, p.ScenarioID, p.Config, ctx.Err())
 			}
 			_, _ = fmt.Fprintf(stdout, "[%d/%d] %s %s %s r%d failed: %v (usd=$%.4f)\n",
@@ -275,6 +290,11 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 			len(failed), failPath, strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+func resultCost(model string, res harness.Result) float64 {
+	c, _ := usd(model, res.InputTokens, res.OutputTokens, res.LongInputTokens, res.LongOutputTokens)
+	return c
 }
 
 func divOrZero(a float64, n int) float64 {
