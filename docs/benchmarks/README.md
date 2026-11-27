@@ -23,6 +23,9 @@ investigator, tools and override store run against it. Only the world is simulat
   capacity (requests per second), and ready and desired replica counts;
 - `SimProm`, which serves each workload's load series and answers the agent's `query_metrics`
   calls. It returns only data at or before the simulated now, so no config sees future data.
+  Only the request-rate series (`http_requests_total`, through `rate`, `irate` and `sum`)
+  exists in the simulator. Any other query (a latency histogram, `increase(...)`, another
+  metric) returns no data, so the agent cannot see latency, errors or resource metrics here.
 
 The clock is frozen while an investigation runs, so LLM latency does not affect the simulation.
 
@@ -31,9 +34,10 @@ The clock is frozen while an investigation runs, so LLM latency does not affect 
 Evaluated every step, per workload:
 
 - breach-minute: offered load exceeds ready replicas x pod capacity;
-- needed replicas: `ceil(load / (capacity x headroom))`;
-- replica-minutes are split into over-provisioning (ready above needed) and under-provisioning
-  (below needed);
+- needed replicas: `ceil(load / (capacity x headroom))`, floored at 1;
+- replica-minutes are split into over-provisioning (desired replicas, unready pods included,
+  above needed) and under-provisioning (needed above ready replicas). The kind collector
+  differs: it uses ready replicas for both sides and applies no floor of 1 to needed;
 - lift (`lift_rm`): replica-minutes the agent's override added above what the baseline wanted.
 
 ### Configurations
@@ -91,7 +95,10 @@ ramp; a scenario only discriminates when startup time exceeds what reaction can 
 ### Pairing and common random numbers
 
 The cluster seed (which drives the startup-delay stream) is constant across configs and
-repeats, so every config sees identical load and identical startup delays. Join rows on
+repeats, so every config sees identical load and the same startup-delay stream. Delays are
+identical by pod-creation index (the nth pod a workload creates always gets the nth draw), not
+per pod: configs that create pods at different times or in different numbers assign the same
+draws to different pods. Join rows on
 `(scenario, seed)`; Tidewatch-mode configs also join on `guardrails`. `repeat` indexes only the
 agent's repeats, because LLM sampling is the only remaining randomness. All deltas in the report
 are paired on this key, which removes scenario-to-scenario variance from the comparisons.
@@ -106,8 +113,9 @@ Two layers, deliberately kept apart:
    guard is close to tautological: the engine's override path can only raise the baseline. It
    catches regressions in that code, and it is not the headline claim.
 2. Paired empirical comparison. The agent's `underprov_rm` and `breach_min` are compared to the
-   baseline's on the same scenario, seed and profile. The report prints the share of paired
-   runs where the agent's under-provisioning is at most the baseline's. This is evidence over
+   baseline's on the same scenario, seed and profile. The report prints in how many paired
+   runs the agent's total under-provisioning (summed over workloads) was never higher than the
+   baseline's, and the same count per workload. This is evidence over
    the runs made, not a proof: enforcer state (cooldowns, rate limits) diverges between runs
    after the first override.
 
@@ -128,6 +136,15 @@ Two layers, deliberately kept apart:
 - LLM nondeterminism. Agent runs vary, hence 5 repeats and reporting medians and IQR. Results
   are specific to the model and prompts at the time of the run; the model name is recorded in
   the CSV.
+- Override timing. Rule overrides (regex-rule) are applied at step t, before `engine.Step`,
+  while agent overrides are written during an investigation and take effect at t + step. This
+  favours the rule baseline by one step.
+- Frozen clock. The fake clock does not advance during an investigation, so LLM latency is not
+  charged. This favours the agent on unannounced surges, where a real investigation would
+  finish minutes later.
+- Note windows on every workload. keda-cron, like regex-rule, opens its window on every
+  workload in the policy even when the note names one service. That is generous to the
+  baselines.
 - Six workloads from one trace and one event placement per workload is a small sample.
 
 ## Reproducing
@@ -187,8 +204,13 @@ is capped at 30,000 tokens and 8 tool calls, and the agent has an hourly token b
 token bound, not a dollar cap. At the price table in `cmd/tidewatch-bench/price.go` (USD 0.10
 per million input tokens, 0.50 per million output), 1.2M all-input tokens is about USD 0.12 per
 run and 1.2M all-output tokens about USD 0.60 per run, so the worst case for 190 runs is about
-USD 23 to USD 114. The real spend limit is `--max-usd`: the runner stops before a run once the
-estimated spend would exceed it. The `usd` column is an estimate from list prices, not a bill.
+USD 23 to USD 114. Haiku's rate applies per call: USD 0.10 and 0.50 per million tokens for
+prompts of up to 100K tokens, and USD 0.50 and 2.50 above that. The simulator tallies the
+input and output tokens of calls with prompts over 100K and charges them at the higher rate;
+the kind collector has only run totals and uses the lower rate. The real spend limit is
+`--max-usd`: the runner stops before a run once the estimated spend would exceed it, and with
+`--provider anthropic` it refuses to start an agent plan without one (`make bench` defaults
+to `--max-usd 5`). The `usd` column is an estimate from list prices, not a bill.
 
 ## Real-cluster validation (kind)
 
