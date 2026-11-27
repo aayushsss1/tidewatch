@@ -10,10 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aayushsss1/tidewatch/internal/engine"
 	"github.com/aayushsss1/tidewatch/pkg/llm"
 	"github.com/aayushsss1/tidewatch/sim/cluster"
 	"github.com/aayushsss1/tidewatch/sim/harness"
 	"github.com/aayushsss1/tidewatch/sim/scenario"
+)
+
+const (
+	keyConfidence = "confidence"
+	keyReason     = "reason"
 )
 
 var baselineCfg = harness.Config{Name: "tidewatch-baseline"}
@@ -48,14 +54,14 @@ func (p *flashProvider) Name() string  { return "scripted" }
 func (p *flashProvider) Model() string { return "scripted-1" }
 
 func (p *flashProvider) Turn(_ context.Context, req llm.TurnRequest) (llm.TurnResponse, error) {
-	name, in := "no_action", map[string]any{"reason": "nothing for the frontend", "confidence": 0.9}
+	name, in := "no_action", map[string]any{keyReason: "nothing for the frontend", keyConfidence: 0.9}
 	if strings.Contains(req.Messages[0].Text, "frontend-deploy: replicas") {
 		name, in = "propose_scaling", map[string]any{
 			"overrides": []map[string]any{{
 				"workload": "frontend-deploy", "minReplicas": p.floor, "end": p.end.Format(time.RFC3339),
 			}},
-			"reason":     "flash sale announced for 09:00",
-			"confidence": 0.9,
+			keyReason:     "flash sale announced for 09:00",
+			keyConfidence: 0.9,
 		}
 	}
 	raw, _ := json.Marshal(in)
@@ -204,5 +210,70 @@ func TestRun_ControllerMode(t *testing.T) {
 	}
 	if res.PerWorkload["frontend"].OverprovRM <= 0 {
 		t.Error("expected over-provisioning")
+	}
+}
+
+// notesProvider reads the ops notes through get_ops_notes on the first turn, records what
+// the tool returned, and concludes with no_action.
+type notesProvider struct{ texts []string }
+
+func (p *notesProvider) Name() string  { return "scripted" }
+func (p *notesProvider) Model() string { return "scripted-1" }
+
+func (p *notesProvider) Turn(_ context.Context, req llm.TurnRequest) (llm.TurnResponse, error) {
+	name, in := "get_ops_notes", map[string]any{}
+	for _, m := range req.Messages {
+		if m.ToolResult != nil {
+			p.texts = append(p.texts, m.ToolResult.Content)
+			name, in = "no_action", map[string]any{keyReason: "none", keyConfidence: 0.9}
+		}
+	}
+	raw, _ := json.Marshal(in)
+	return llm.TurnResponse{
+		Message: llm.Message{Role: llm.RoleAssistant, ToolCall: &llm.ToolCall{ID: "c", Name: name, Input: raw}},
+	}, nil
+}
+
+func TestRun_PublishesAllDueNotesNewestLast(t *testing.T) {
+	sc := loadScenario(t)
+	sc.NoteSpecs[0].PublishAt = 8*time.Hour + 10*time.Minute
+	second := sc.NoteSpecs[0]
+	second.Text = "SECOND-NOTE-MARKER"
+	sc.NoteSpecs = append(sc.NoteSpecs, second)
+	p := &notesProvider{}
+	cfg := harness.Config{Name: "tidewatch-agent", Agent: true, Provider: p}
+	if _, err := harness.Run(context.Background(), sc, cfg, 0, harness.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, txt := range p.texts {
+		i, j := strings.Index(txt, "Flash sale starts"), strings.Index(txt, "SECOND-NOTE-MARKER")
+		if i >= 0 && j > i && strings.Contains(txt[i:j], `\n\n`) {
+			return
+		}
+	}
+	t.Fatalf("no prompt carried both notes (%d prompts): %q", len(p.texts), p.texts)
+}
+
+func TestRun_RuleHookDefersUntilFirstSnapshot(t *testing.T) {
+	sc := loadScenario(t)
+	sc.NoteSpecs[0].PublishAt = sc.Start // due on the very first step, before any snapshot
+	var calls []time.Time
+	var nsnaps []int
+	cfg := harness.Config{
+		Name: "rule",
+		RuleOverrides: func(now time.Time, notes []scenario.Note, snaps map[string]engine.Snapshot) []harness.RuleOverride {
+			calls = append(calls, now)
+			nsnaps = append(nsnaps, len(snaps))
+			return nil
+		},
+	}
+	if _, err := harness.Run(context.Background(), sc, cfg, 0, harness.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("hook called %d times, want exactly once", len(calls))
+	}
+	if want := sc.StartTime().Add(sc.Step); !calls[0].Equal(want) || nsnaps[0] != len(sc.Workloads) {
+		t.Fatalf("hook at %v with %d snapshots, want %v with %d", calls[0], nsnaps[0], want, len(sc.Workloads))
 	}
 }

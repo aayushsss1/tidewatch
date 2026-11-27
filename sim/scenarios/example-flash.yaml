@@ -39,4 +39,4 @@ events:
     mult: 3
 notes:
   - publishAt: 8h15m
-    text: "Flash sale starts at 09:00, expect ~3x traffic for about 30 minutes."
+    text: "Flash sale starts at 09:00 UTC, expect ~3x traffic for about 30 minutes."
