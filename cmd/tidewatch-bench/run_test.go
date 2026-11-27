@@ -266,7 +266,7 @@ func TestAgentNeedsKey(t *testing.T) {
 
 func TestUSD(t *testing.T) {
 	for model, want := range map[string]float64{
-		"claude-haiku-5-5": 0.6, "claude-sonnet-5-5": 12, "claude-opus-5-5": 24,
+		defaultModel: 0.6, "claude-sonnet-5-5": 12, "claude-opus-5-5": 24,
 	} {
 		if got, ok := usd(model, 1_000_000, 1_000_000); !ok || got != want {
 			t.Errorf("%s: %v %v, want %v", model, got, ok, want)
@@ -421,7 +421,7 @@ func TestFailedRunCountsTokensAndIsReported(t *testing.T) {
 }
 
 func TestResumeKeyIncludesModel(t *testing.T) {
-	a := plannedRun{ScenarioID: "s", Config: cfgAgent, Guardrails: profMatched, Model: "claude-haiku-5-5"}
+	a := plannedRun{ScenarioID: "s", Config: cfgAgent, Guardrails: profMatched, Model: defaultModel}
 	b := a
 	b.Model = "claude-sonnet-5-5"
 	if a.key() == b.key() {

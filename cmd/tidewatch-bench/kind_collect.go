@@ -34,6 +34,8 @@ import (
 var kindHeader = append(append([]string{}, csvHeader...), "env", "p95_ms", "p99_ms")
 
 const (
+	paramQuery = "query"
+	trueStr    = "true"
 	kindEnv    = "kind"
 	loadRule   = "bench:load_rps"
 	readyRule  = "bench:ready_replicas"
@@ -96,7 +98,8 @@ func kindCollectCmd(ctx context.Context, args []string, stdout io.Writer) error 
 			kc.Guardrails = guardMatch
 		}
 	}
-	rows, err := collectKind(ctx, &promClient{base: strings.TrimRight(kc.Prom, "/"), hc: &http.Client{Timeout: 30 * time.Second}}, kc)
+	pc := &promClient{base: strings.TrimRight(kc.Prom, "/"), hc: &http.Client{Timeout: 30 * time.Second}}
+	rows, err := collectKind(ctx, pc, kc)
 	if err != nil {
 		return err
 	}
@@ -171,7 +174,7 @@ func parseSample(v [2]any) (point, bool) {
 // rangeSeries returns the single series of a range query, or nil when it matched nothing.
 func (c *promClient) rangeSeries(ctx context.Context, query string, kc kindConfig) ([]point, error) {
 	pr, err := c.get(ctx, "/api/v1/query_range", url.Values{
-		"query": {query}, "step": {strconv.Itoa(int(kindStep.Seconds()))},
+		paramQuery: {query}, "step": {strconv.Itoa(int(kindStep.Seconds()))},
 		"start": {strconv.FormatInt(kc.Start.Unix(), 10)}, "end": {strconv.FormatInt(kc.End.Unix(), 10)},
 	})
 	if err != nil {
@@ -191,7 +194,7 @@ func (c *promClient) rangeSeries(ctx context.Context, query string, kc kindConfi
 
 // scalar returns an instant query's value at t; ok is false when nothing matched or it is NaN.
 func (c *promClient) scalar(ctx context.Context, query string, t time.Time) (float64, bool, error) {
-	pr, err := c.get(ctx, "/api/v1/query", url.Values{"query": {query}, "time": {strconv.FormatInt(t.Unix(), 10)}})
+	pr, err := c.get(ctx, "/api/v1/query", url.Values{paramQuery: {query}, "time": {strconv.FormatInt(t.Unix(), 10)}})
 	if err != nil {
 		return 0, false, err
 	}
@@ -204,7 +207,7 @@ func (c *promClient) scalar(ctx context.Context, query string, t time.Time) (flo
 
 // vector returns an instant query's values keyed by one label.
 func (c *promClient) vector(ctx context.Context, query, label string, t time.Time) (map[string]float64, error) {
-	pr, err := c.get(ctx, "/api/v1/query", url.Values{"query": {query}, "time": {strconv.FormatInt(t.Unix(), 10)}})
+	pr, err := c.get(ctx, "/api/v1/query", url.Values{paramQuery: {query}, "time": {strconv.FormatInt(t.Unix(), 10)}})
 	if err != nil {
 		return nil, err
 	}
@@ -285,10 +288,12 @@ func collectKind(ctx context.Context, pc *promClient, kc kindConfig) ([][]string
 			return nil, err
 		}
 		if len(load) == 0 || len(ready) == 0 {
-			return nil, fmt.Errorf("workload %s: no %s or %s samples in the window; is the PrometheusRule loaded?", w, loadRule, readyRule)
+			return nil, fmt.Errorf("workload %s: no %s or %s samples in the window; is the PrometheusRule loaded?",
+				w, loadRule, readyRule)
 		}
 		acct := accountMinutes(load, ready, kc.Capacity, kc.Headroom)
-		events, _, err := pc.scalar(ctx, fmt.Sprintf(`changes(kube_deployment_spec_replicas{namespace=%q,deployment=%q}[%s])`, kc.Namespace, w, window), kc.End)
+		events, _, err := pc.scalar(ctx, fmt.Sprintf(
+			`changes(kube_deployment_spec_replicas{namespace=%q,deployment=%q}[%s])`, kc.Namespace, w, window), kc.End)
 		if err != nil {
 			return nil, err
 		}
@@ -326,7 +331,7 @@ func collectKind(ctx context.Context, pc *promClient, kc kindConfig) ([][]string
 			}
 			row[13] = strconv.Itoa(acct.Skipped)
 			row[19] = strconv.FormatFloat(wall, 'f', 2, 64)
-			row[20] = "true"
+			row[20] = trueStr
 		} else {
 			// Run-level columns live on the lead row only; fold this workload's skips into it.
 			rows[0][13] = strconv.Itoa(atoiZero(rows[0][13]) + acct.Skipped)

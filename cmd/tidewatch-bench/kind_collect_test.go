@@ -82,7 +82,7 @@ func TestKindCollectWritesRows(t *testing.T) {
 	defer srv.Close()
 	out := filepath.Join(t.TempDir(), "results.csv")
 	var stdout bytes.Buffer
-	args := []string{"--prom", srv.URL, "--out", out, "--config", "tidewatch-agent", "--model", "claude-haiku-5-5",
+	args := []string{"--prom", srv.URL, "--out", out, "--config", "tidewatch-agent", "--model", defaultModel,
 		"--agent", "--workloads", "frontend,api", "--start", "2023-11-14T22:13:20Z", "--end", "2023-11-14T22:18:20Z"}
 	if err := kindCollectCmd(context.Background(), args, &stdout); err != nil {
 		t.Fatal(err)
