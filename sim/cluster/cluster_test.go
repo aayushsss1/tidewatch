@@ -112,14 +112,14 @@ func TestNeededFloor(t *testing.T) {
 	}
 }
 
-func TestAccountOverride(t *testing.T) {
+func TestAccountLift(t *testing.T) {
 	c, _ := newC(1, 0)
 	k := Key{"ns", "a"}
-	c.AccountOverride(2*time.Minute, k, 3, 8, 5) // waste (8-5)*2 = 6
-	c.AccountOverride(time.Minute, k, 3, 4, 6)   // 0
-	c.AccountOverride(time.Minute, k, 3, 2, 1)   // violation
+	c.AccountLift(2*time.Minute, k, 3, 8) // lift (8-3)*2 = 10
+	c.AccountLift(time.Minute, k, 3, 3)   // 0
+	c.AccountLift(time.Minute, k, 3, 2)   // violation
 	m, _ := c.Metrics("ns", "a")
-	if m.OverrideWasteRM != 6 || m.SafetyViolation != 1 {
+	if m.LiftRM != 10 || m.SafetyViolation != 1 {
 		t.Fatalf("got %+v", m)
 	}
 }
