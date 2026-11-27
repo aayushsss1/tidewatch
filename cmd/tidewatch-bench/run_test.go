@@ -23,6 +23,7 @@ const (
 	profMatched      = string(harness.GuardrailsMatched)
 	idFlash          = "grp/a-flash"
 	leadName         = "frontend"
+	testKey          = "sk-test"
 )
 
 const testScenario = `
@@ -199,7 +200,7 @@ func TestRunMaxUSD(t *testing.T) {
 	mf := fixture(t, "repeats: {tidewatch-agent: 5}\n")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, "sk-test"
+	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, testKey
 	rc.Configs, rc.MaxUSD = []string{cfgAgent}, 0.25
 	var out bytes.Buffer
 	if err := execute(context.Background(), rc, &out); err != nil {
@@ -243,7 +244,7 @@ func TestAnthropicAgentRunNeedsSpendCap(t *testing.T) {
 	mf := fixture(t, "")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, "sk-test"
+	rc.Provider, rc.Model, rc.key = providerAnthropic, defaultModel, testKey
 	err := execute(context.Background(), rc, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "--max-usd 5") {
 		t.Fatalf("err = %v, want a message suggesting --max-usd 5", err)
@@ -427,7 +428,7 @@ func TestFailedRunCountsTokensAndIsReported(t *testing.T) {
 	mf := fixture(t, "")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.key, rc.MaxUSD = providerAnthropic, "sk-test", 100
+	rc.Provider, rc.key, rc.MaxUSD = providerAnthropic, testKey, 100
 	rc.Configs = []string{cfgAgent}
 	ok := rc.exec
 	rc.exec = func(ctx context.Context, sc *scenario.Scenario, p plannedRun, seed int64) (harness.Result, error) {
@@ -461,7 +462,7 @@ func TestInterruptedRunRecordsSpend(t *testing.T) {
 	mf := fixture(t, "")
 	var calls []plannedRun
 	rc := fakeRC(t, mf, &calls)
-	rc.Provider, rc.key, rc.MaxUSD = providerAnthropic, "sk-test", 100
+	rc.Provider, rc.key, rc.MaxUSD = providerAnthropic, testKey, 100
 	rc.Configs = []string{cfgAgent}
 	ctx, cancel := context.WithCancel(context.Background())
 	ok := rc.exec

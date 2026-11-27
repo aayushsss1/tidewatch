@@ -113,6 +113,19 @@ func (rc *runConfig) provider() (llm.Provider, error) {
 	return nil, fmt.Errorf("--provider %q: want anthropic or scripted", rc.Provider)
 }
 
+// paidProvider builds the provider and, for the paid one, insists on a spend cap.
+func (rc *runConfig) paidProvider() (llm.Provider, error) {
+	prov, err := rc.provider()
+	if err != nil {
+		return nil, err
+	}
+	if rc.Provider == providerAnthropic && rc.MaxUSD <= 0 {
+		return nil, errors.New("run: this plan makes paid model calls; refusing to start without a spend cap. " +
+			"Pass --max-usd (for example --max-usd 5)")
+	}
+	return prov, nil
+}
+
 // harnessExec returns the executor that drives the real harness.
 func (rc *runConfig) harnessExec(prov llm.Provider) executor {
 	return func(ctx context.Context, sc *scenario.Scenario, p plannedRun, seed int64) (harness.Result, error) {
@@ -157,12 +170,8 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 	}
 	var prov llm.Provider
 	if slices.ContainsFunc(runs, func(p plannedRun) bool { return p.Config == baselines.NameTWAgent }) {
-		if prov, err = rc.provider(); err != nil {
+		if prov, err = rc.paidProvider(); err != nil {
 			return err
-		}
-		if rc.Provider == providerAnthropic && rc.MaxUSD <= 0 {
-			return errors.New("run: this plan makes paid model calls; refusing to start without a spend cap. " +
-				"Pass --max-usd (for example --max-usd 5)")
 		}
 	}
 	if err := os.MkdirAll(rc.Out, 0o750); err != nil {
@@ -240,7 +249,7 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 		t0 := time.Now()
 		res, err := exec(ctx, cur, p, seed)
 		wall := time.Since(t0).Seconds()
-		cost, _ := usd(p.Model, res.InputTokens, res.OutputTokens, res.LongInputTokens, res.LongOutputTokens) // tokens of a failed run still count
+		cost := resultCost(p.Model, res) // tokens of a failed run still count
 		spent += cost
 		sessionSpent += cost
 		if p.Config == baselines.NameTWAgent {
@@ -281,6 +290,11 @@ func execute(ctx context.Context, rc runConfig, stdout io.Writer) error {
 			len(failed), failPath, strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+func resultCost(model string, res harness.Result) float64 {
+	c, _ := usd(model, res.InputTokens, res.OutputTokens, res.LongInputTokens, res.LongOutputTokens)
+	return c
 }
 
 func divOrZero(a float64, n int) float64 {

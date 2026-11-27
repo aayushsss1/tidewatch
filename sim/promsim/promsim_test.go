@@ -68,7 +68,8 @@ func TestFutureIsNaN(t *testing.T) {
 	s, _, clk := setup(t)
 	now := clk.Now()
 	got, _ := s.RangeSeries(
-		context.Background(), `http_requests_total{app="frontend"}`, now.Add(-2*time.Minute), now.Add(3*time.Minute), time.Minute)
+		context.Background(), `http_requests_total{app="frontend"}`,
+		now.Add(-2*time.Minute), now.Add(3*time.Minute), time.Minute)
 	for i, p := range got.Points {
 		if p.T.After(now) != math.IsNaN(p.V) {
 			t.Fatalf("point %d (%v) v=%v", i, p.T, p.V)
