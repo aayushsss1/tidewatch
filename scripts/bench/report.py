@@ -27,10 +27,17 @@ B_FAMILIES = ["b-adversarial", "b-wrong-time"]
 SUM_COLS = ["breach_min", "overprov_rm", "underprov_rm", "scale_events", "lift_rm",
             "safety_violations", "skipped_steps"]
 LEAD_COLS = ["investigations", "llm_calls", "input_tokens", "output_tokens", "usd", "wall_seconds"]
-RUN_KEY = ["scenario", "config", "guardrails", "repeat", "seed"]
+RUN_KEY = ["scenario", "config", "guardrails", "repeat", "seed", "model"]
 # Okabe-Ito, colorblind safe.
 COLORS = {HPA: "#000000", KEDA_P: "#E69F00", KEDA_C: "#56B4E9", BASE: "#009E73",
           REGEX: "#F0E442", AGENT: "#D55E00", ORACLE: "#0072B2"}
+
+
+class _Holder:
+    """Carries a DataFrame in DataFrame.attrs (pandas compares attrs with ==, which a frame breaks)."""
+
+    def __init__(self, df):
+        self.df = df
 
 
 def family(scenario: str) -> str:
@@ -48,6 +55,9 @@ def load(path) -> pd.DataFrame:
         raise ValueError("more than one lead row for a run")
     runs = sums.merge(lead, on=RUN_KEY, how="left").fillna({c: 0 for c in LEAD_COLS})
     runs["family"] = runs["scenario"].map(family)
+    # Per-workload rows, kept for the per-workload capacity check.
+    df["family"] = df["scenario"].map(family)
+    runs.attrs["workloads"] = _Holder(df[RUN_KEY + ["workload", "family", "underprov_rm"]])
     runs["tokens"] = runs["input_tokens"] + runs["output_tokens"]
     return runs
 
@@ -81,14 +91,23 @@ def is_b(df):
     return df["family"].isin(B_FAMILIES)
 
 
+def is_headline(df):
+    """Headline scope: the flash and cascade families (control and the B scenarios excluded)."""
+    return df["family"].str.startswith(("flash", "cascade"))
+
+
+def is_control(df):
+    return df["family"] == "control"
+
+
 def iqr(x):
     x = np.asarray(x, dtype=float)
     return float(np.percentile(x, 25)), float(np.percentile(x, 75))
 
 
 def per_repeat_totals(v: pd.DataFrame, config: str) -> pd.DataFrame:
-    """Per-repeat totals of one config over the event (non-B) scenarios."""
-    r = v[(v["config"] == config) & ~is_b(v)]
+    """Per-repeat totals of one config over the headline (flash and cascade) scenarios."""
+    r = v[(v["config"] == config) & is_headline(v)]
     return r.groupby("repeat")[["breach_min", "overprov_rm", "underprov_rm", "usd", "tokens"]].sum()
 
 
@@ -117,7 +136,7 @@ def headline(runs: pd.DataFrame, profile: str) -> list:
                                              for x in (row["breach_iqr"][1], row["breach_iqr"][0]))
             row["extra_rm_iqr"] = tuple(x - ho for x in row["overprov_iqr"])
         if cfg == AGENT:
-            ev = v[(v["config"] == AGENT) & ~is_b(v)]
+            ev = v[(v["config"] == AGENT) & ~is_b(v)]  # cost covers every non-B scenario, control included
             bb = v[(v["config"] == AGENT) & is_b(v)]
             row["usd_per_run"], row["tokens_per_run"] = float(ev["usd"].mean()), float(ev["tokens"].mean())
             if len(bb):
@@ -126,16 +145,44 @@ def headline(runs: pd.DataFrame, profile: str) -> list:
     return rows
 
 
-def pair_stats(m: pd.DataFrame) -> dict:
+def paired_workloads(runs: pd.DataFrame, a: str, b: str, profile: str) -> pd.DataFrame:
+    """Per-workload underprov deltas a - b, joined like paired() plus the workload."""
+    wl = runs.attrs["workloads"].df
+    v = wl[(wl["guardrails"] == profile) | (wl["guardrails"] == "n/a")]
+    cols = ["scenario", "seed", "workload"]
+    m = v[v["config"] == a][cols + ["repeat", "underprov_rm"]].merge(
+        v[v["config"] == b][cols + ["underprov_rm"]], on=cols, suffixes=("_a", "_b"))
+    m["d_underprov_rm"] = m["underprov_rm_a"] - m["underprov_rm_b"]
+    return m
+
+
+def control_section(runs: pd.DataFrame, profile: str) -> list:
+    """False-alarm waste: per-config totals over the control scenarios (no real surge)."""
+    v = view(runs, profile)
+    v = v[is_control(v)]
+    if v.empty:
+        return []
+    t = v.groupby(["config", "repeat"])[["overprov_rm", "breach_min"]].sum().groupby("config").median()
+    ho = float(t.loc[HPA, "overprov_rm"]) if HPA in t.index else 0.0
+    return [{"config": c, "overprov": float(t.loc[c, "overprov_rm"]), "extra_rm": float(t.loc[c, "overprov_rm"]) - ho,
+             "breach": float(t.loc[c, "breach_min"])} for c in CONFIGS if c in t.index]
+
+
+def pair_stats(m: pd.DataFrame, w: pd.DataFrame = None) -> dict:
     if m.empty:
         return {"n": 0}
-    return {"n": int(len(m)),
+    out = {"n": int(len(m)),
             "breach_delta_sum": float(m["d_breach_min"].sum()),
             "breach_delta_median": float(m["d_breach_min"].median()),
             "underprov_delta_sum": float(m["d_underprov_rm"].sum()),
             "overprov_delta_sum": float(m["d_overprov_rm"].sum()),
             "overprov_delta_median": float(m["d_overprov_rm"].median()),
+            "n_underprov_le": int((m["d_underprov_rm"] <= 0).sum()),
             "share_underprov_le": float((m["d_underprov_rm"] <= 0).mean())}
+    if w is not None and len(w):
+        out.update({"n_workloads": int(len(w)), "n_workload_underprov_le": int((w["d_underprov_rm"] <= 0).sum()),
+                    "share_workload_underprov_le": float((w["d_underprov_rm"] <= 0).mean())})
+    return out
 
 
 def per_family(runs: pd.DataFrame, profile: str) -> pd.DataFrame:
@@ -175,11 +222,13 @@ def build(runs: pd.DataFrame) -> dict:
     has_agent = bool((runs["config"] == AGENT).any())
     res = {"has_agent": has_agent, "safety": safety(runs), "profiles": {}}
     for p in profiles(runs):
-        pr = {"headline": headline(runs, p), "b": b_section(runs, p), "paired": {}}
+        pr = {"headline": headline(runs, p), "control": control_section(runs, p), "b": b_section(runs, p),
+              "paired": {}}
         if has_agent:
             for other in (BASE, REGEX):
                 m = paired(runs, AGENT, other, p)
-                pr["paired"][other] = {"events": pair_stats(m[~is_b(m)]), "all": pair_stats(m)}
+                w = paired_workloads(runs, AGENT, other, p)
+                pr["paired"][other] = {"events": pair_stats(m[is_headline(m)]), "all": pair_stats(m, w)}
         res["profiles"][p] = pr
     return res
 
@@ -219,7 +268,7 @@ def figures(runs: pd.DataFrame, profile: str, out: Path) -> list:
     ax.bar(x + 0.2, [r["underprov"] for r in hl], 0.4, label="under-provisioned", color="#D55E00")
     ax.set_xticks(x)
     ax.set_xticklabels([r["config"] for r in hl], rotation=25, ha="right")
-    ax.set_ylabel("replica-minutes (event scenarios)")
+    ax.set_ylabel("replica-minutes (flash and cascade scenarios)")
     ax.set_title(f"Replica-minutes by config ({profile} guardrails)")
     ax.legend()
     fig.tight_layout()
@@ -272,16 +321,26 @@ def md_table(header, rows):
                      + ["| " + " | ".join(str(c) for c in r) + " |" for r in rows])
 
 
+def family_table(runs: pd.DataFrame, p: str) -> list:
+    tab = per_family(runs, p)
+    return [md_table(["family"] + list(tab.columns), [[f] + [num(x) for x in tab.loc[f]] for f in tab.index]), ""]
+
+
 def render(runs: pd.DataFrame, res: dict, figs: dict, title: str) -> str:
     L = [f"# Benchmark summary: {title}", ""]
+    L += ["## Breach-minutes per family (median over repeats)", ""]
+    for p in res["profiles"]:
+        L += [f"### Profile: {p}", ""] + family_table(runs, p)
     L += ["## How to read this", "",
           "- Breach-minute: a simulated minute where offered load exceeds ready capacity. Lower is better.",
           "- Replica-minutes are split into over-provisioned (cost) and under-provisioned (capacity shortfall).",
           "- All deltas are paired: runs of the same scenario share the cluster seed (common random numbers), "
           "and Tidewatch-mode configs also pair on the guardrails profile.",
-          "- Headline numbers cover the event scenarios (flash, cascade, slow-start, control). The two B scenarios "
-          "have their own section. Agent figures are the median [IQR] over repeats of the per-repeat totals.",
-          "- The 'never less capacity than baseline' check is empirical over the runs here, not a proof.",
+          "- Headline breach-minutes and extra replica-minutes cover the flash and cascade families only "
+          "(slow-start variants included). The control scenarios are reported separately as false-alarm waste "
+          "and the two B scenarios have their own section. Agent figures are the median [IQR] over repeats of "
+          "the per-repeat totals.",
+          "- The capacity check is empirical over the runs here, not a proof.",
           "- Simulated cluster: see the methodology README for threats to validity.", ""]
     s = res["safety"]
     L += ["## Safety", ""]
@@ -291,7 +350,7 @@ def render(runs: pd.DataFrame, res: dict, figs: dict, title: str) -> str:
     else:
         L += ["safety_violations = 0, skipped_steps = 0 across all runs.", ""]
     for p, pr in res["profiles"].items():
-        L += [f"## Guardrails profile: {p}", "", "### Headline", ""]
+        L += [f"## Guardrails profile: {p}", "", "### Headline (flash and cascade families)", ""]
         rows = []
         for r in pr["headline"]:
             agent = r["config"] == AGENT
@@ -301,30 +360,38 @@ def render(runs: pd.DataFrame, res: dict, figs: dict, title: str) -> str:
                          num(r["underprov"]),
                          f"${r['usd_per_run']:.4f} / {num(r['tokens_per_run'])}" if agent else "-"])
         L += [md_table(["config", "breach-min", "% prevented vs HPA", "extra replica-min vs HPA",
-                        "underprov replica-min", "agent $/run / tokens/run (event scenarios)"], rows), ""]
+                        "underprov replica-min", "agent $/run / tokens/run (non-B scenarios)"], rows), ""]
+        if pr["control"]:
+            L += ["### False-alarm waste (control scenarios, median over repeats)", "",
+                  md_table(["config", "overprov replica-min", "extra replica-min vs HPA", "breach-min"],
+                           [[c["config"], num(c["overprov"]), num(c["extra_rm"]), num(c["breach"])]
+                            for c in pr["control"]]), ""]
         if not res["has_agent"]:
             L += ["Agent results pending.", ""]
-        elif any("b_usd_per_run" in r for r in pr["headline"]):
-            r = next(r for r in pr["headline"] if "b_usd_per_run" in r)
-            L += [f"Agent cost per run on the B scenarios: ${r['b_usd_per_run']:.4f} / {num(r['b_tokens_per_run'])} tokens.", ""]
         else:
-            L += ["### Paired deltas (agent minus comparison)", ""]
-            rows = []
+            if any("b_usd_per_run" in r for r in pr["headline"]):
+                r = next(r for r in pr["headline"] if "b_usd_per_run" in r)
+                L += [f"Agent cost per run on the B scenarios: ${r['b_usd_per_run']:.4f} / "
+                      f"{num(r['b_tokens_per_run'])} tokens.", ""]
+            L += ["### Paired deltas (agent minus comparison; flash and cascade families)", ""]
+            rows, checks = [], []
             for other, d in pr["paired"].items():
                 e, a = d["events"], d["all"]
-                if not e["n"]:
-                    continue
-                rows.append([f"agent - {other}", e["n"], num(e["breach_delta_sum"]), num(e["breach_delta_median"], 1),
-                             num(e["underprov_delta_sum"]), num(e["overprov_delta_sum"]),
-                             num(e["overprov_delta_median"], 1),
-                             f"{100 * a['share_underprov_le']:.1f}% ({a['n']} runs)"])
+                if e["n"]:
+                    rows.append([f"agent - {other}", e["n"], num(e["breach_delta_sum"]), num(e["breach_delta_median"], 1),
+                                 num(e["underprov_delta_sum"]), num(e["overprov_delta_sum"]),
+                                 num(e["overprov_delta_median"], 1)])
+                if a["n"]:
+                    c = (f"- vs {other}: total under-provisioning (summed over workloads) was never higher than the "
+                         f"paired baseline in {a['n_underprov_le']} of {a['n']} paired runs (empirical)")
+                    if "n_workloads" in a:
+                        c += (f"; per workload, in {a['n_workload_underprov_le']} of {a['n_workloads']} paired "
+                              f"workload runs ({100 * a['share_workload_underprov_le']:.1f}%)")
+                    checks.append(c + ".")
             L += [md_table(["pair", "n", "breach delta (sum)", "breach delta (median)", "underprov delta (sum)",
-                            "agent waste: overprov delta (sum)", "overprov delta (median)",
-                            "share agent underprov <= comparison (empirical, all scenarios)"], rows), ""]
-        L += ["### Breach-minutes per family (median over repeats)", ""]
-        tab = per_family(runs, p)
-        L += [md_table(["family"] + list(tab.columns),
-                       [[f] + [num(x) for x in tab.loc[f]] for f in tab.index]), ""]
+                            "agent waste: overprov delta (sum)", "overprov delta (median)"], rows), ""]
+            if checks:
+                L += ["Capacity check (all scenarios, B included):", ""] + checks + [""]
         L += ["### B scenarios (comparison is against tidewatch-baseline)", ""]
         if pr["b"]:
             L += [md_table(["scenario", "config", "n", "breach", "overprov delta (median)", "overprov delta (max)",

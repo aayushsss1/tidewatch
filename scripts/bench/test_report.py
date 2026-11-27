@@ -55,8 +55,21 @@ def test_percentages_and_extra(runs):
 
 def test_share_underprov_le(runs):
     s = report.build(runs)["profiles"]["matched"]["paired"]["tidewatch-baseline"]["all"]
-    assert s["n"] == 6 and s["share_underprov_le"] == 1.0
+    assert s["n"] == 6 and s["share_underprov_le"] == 1.0 and s["n_underprov_le"] == 6
+    assert s["n_workloads"] >= 6 and s["share_workload_underprov_le"] == 1.0
     assert report.build(runs)["profiles"]["matched"]["paired"]["regex-rule"]["all"]["n"] == 6
+
+
+def test_headline_excludes_control_and_b(runs):
+    h = {r["config"]: r for r in report.headline(runs, "matched")}
+    assert h["hpa"]["breach"] == 40  # flash only: control (0) and the B scenarios do not count
+    assert h["regex-rule"]["overprov"] == 280
+    ctl = {c["config"]: c for c in report.control_section(runs, "matched")}
+    assert ctl["hpa"]["overprov"] == 40 and ctl["hpa"]["extra_rm"] == 0
+
+
+def test_run_key_includes_model():
+    assert "model" in report.RUN_KEY
 
 
 def test_b_section_flags_never_below(runs):
@@ -88,6 +101,10 @@ def test_full_report_writes_everything(tmp_path):
     report.main([str(CSV), "--out", str(tmp_path)])
     md = (tmp_path / "summary.md").read_text()
     assert "Paired deltas" in md and "WARNING" not in md
+    assert md.index("Breach-minutes per family") < md.index("How to read this")
+    matched = md.split("## Guardrails profile: matched", 1)[1].split("## Guardrails profile: default")[0]
+    assert "\n| agent - tidewatch-baseline |" in matched and "\n| agent - regex-rule |" in matched
+    assert "never higher than the paired baseline in 6 of 6 paired runs (empirical)" in matched
     assert len(list(tmp_path.glob("*.png"))) == 6  # 3 figures x 2 profiles
     pc = pd.read_csv(tmp_path / "paired_tidewatch-baseline_matched.csv")
     assert len(pc) == 6 and "d_underprov_rm" in pc.columns
